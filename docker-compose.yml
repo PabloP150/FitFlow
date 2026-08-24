@@ -1,0 +1,186 @@
+version: '3.8'
+
+services:
+  # ============================================
+  # PostgreSQL Databases (Task 1)
+  # ============================================
+
+  users-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${USERS_DB_USER}
+      POSTGRES_PASSWORD: ${USERS_DB_PASSWORD}
+      POSTGRES_DB: ${USERS_DB_NAME}
+    volumes:
+      - users_db_data:/var/lib/postgresql/data
+    ports:
+      - "${USERS_DB_PORT}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${USERS_DB_USER} -d ${USERS_DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fitflow-net
+
+  booking-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${BOOKING_DB_USER}
+      POSTGRES_PASSWORD: ${BOOKING_DB_PASSWORD}
+      POSTGRES_DB: ${BOOKING_DB_NAME}
+    volumes:
+      - booking_db_data:/var/lib/postgresql/data
+    ports:
+      - "${BOOKING_DB_PORT}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${BOOKING_DB_USER} -d ${BOOKING_DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fitflow-net
+
+  notif-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${NOTIF_DB_USER}
+      POSTGRES_PASSWORD: ${NOTIF_DB_PASSWORD}
+      POSTGRES_DB: ${NOTIF_DB_NAME}
+    volumes:
+      - notif_db_data:/var/lib/postgresql/data
+    ports:
+      - "${NOTIF_DB_PORT}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${NOTIF_DB_USER} -d ${NOTIF_DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fitflow-net
+
+  # ============================================
+  # Service Registry (Task 2A)
+  # ============================================
+
+  consul:
+    image: hashicorp/consul:1.17
+    command: agent -dev -client=0.0.0.0
+    ports:
+      - "8500:8500"
+    networks:
+      - fitflow-net
+
+  # ============================================
+  # Microservices (Task 1 & 2A)
+  # ============================================
+
+  users-svc:
+    build: ./users-svc
+    ports:
+      - "8003:8003"
+    env_file: .env
+    environment:
+      SERVICE_NAME: users-svc
+      SERVICE_HOST: users-svc
+      SERVICE_PORT: "8003"
+      CONSUL_HOST: ${CONSUL_HOST}
+      CONSUL_PORT: ${CONSUL_PORT}
+      DATABASE_URL: postgresql+psycopg2://${USERS_DB_USER}:${USERS_DB_PASSWORD}@users-db:5432/${USERS_DB_NAME}
+    depends_on:
+      users-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - fitflow-net
+
+  booking-svc:
+    build: ./booking-svc
+    ports:
+      - "8001:8001"
+    env_file: .env
+    environment:
+      SERVICE_NAME: booking-svc
+      SERVICE_HOST: booking-svc
+      SERVICE_PORT: "8001"
+      CONSUL_HOST: ${CONSUL_HOST}
+      CONSUL_PORT: ${CONSUL_PORT}
+      DATABASE_URL: postgresql+psycopg2://${BOOKING_DB_USER}:${BOOKING_DB_PASSWORD}@booking-db:5432/${BOOKING_DB_NAME}
+    depends_on:
+      booking-db:
+        condition: service_healthy
+      consul:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - fitflow-net
+
+  notif-svc:
+    build: ./notif-svc
+    ports:
+      - "8002:8002"
+    env_file: .env
+    environment:
+      SERVICE_NAME: notif-svc
+      SERVICE_HOST: notif-svc
+      SERVICE_PORT: "8002"
+      CONSUL_HOST: ${CONSUL_HOST}
+      CONSUL_PORT: ${CONSUL_PORT}
+      DATABASE_URL: postgresql+psycopg2://${NOTIF_DB_USER}:${NOTIF_DB_PASSWORD}@notif-db:5432/${NOTIF_DB_NAME}
+    depends_on:
+      notif-db:
+        condition: service_healthy
+      consul:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - fitflow-net
+
+  # ============================================
+  # MCP Server (Task 2B, optional HTTP profile)
+  # ============================================
+
+  fitflow-mcp:
+    build: ./fitflow-mcp
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      CONSUL_HOST: ${CONSUL_HOST}
+      CONSUL_PORT: ${CONSUL_PORT}
+      MCP_RUN_MODE: docker
+    depends_on:
+      - consul
+    profiles:
+      - "http"
+    networks:
+      - fitflow-net
+
+# ============================================
+# Volumes
+# ============================================
+
+volumes:
+  users_db_data:
+  booking_db_data:
+  notif_db_data:
+
+# ============================================
+# Networks
+# ============================================
+
+networks:
+  fitflow-net:
+    driver: bridge
