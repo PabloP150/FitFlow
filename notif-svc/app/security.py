@@ -1,3 +1,13 @@
+"""Validacion de JWT para notif-svc (Task 4 — Seguridad).
+
+Espejo del `security.py` de booking-svc: solo se usa para proteger
+`GET /notifications/user/{user_id}` (historial de notificaciones de un
+usuario), de forma que un usuario autenticado solo pueda ver sus propias
+notificaciones. `POST /notifications` (llamado internamente por
+booking-svc) queda sin auth por ahora — es trafico servicio-a-servicio, no
+de un cliente final.
+"""
+
 from typing import Optional
 
 import jwt
@@ -13,7 +23,6 @@ class TokenPayload(BaseModel):
 def decode_token(token: str, settings) -> TokenPayload:
     """Decode and verify a JWT token."""
     try:
-        # Remove "Bearer " prefix if present
         if token.startswith("Bearer "):
             token = token[7:]
 
@@ -24,21 +33,11 @@ def decode_token(token: str, settings) -> TokenPayload:
         )
         return TokenPayload(**payload)
     except (jwt.InvalidTokenError, ValidationError) as e:
-        # jwt.InvalidTokenError: firma invalida, token expirado, malformado, etc.
-        # ValidationError: el JWT es valido y esta bien firmado, pero su
-        # payload no trae los campos esperados (p.ej. falta "user_id") — sin
-        # este catch, TokenPayload(**payload) dejaba escapar un
-        # pydantic.ValidationError que FastAPI convertia en un 500 en vez de
-        # un 401 consistente.
         raise ValueError(f"Invalid token: {e}")
 
 
 def get_current_user_id(authorization: Optional[str] = Header(None)) -> int:
-    """FastAPI dependency: extract and validate user_id from the Authorization header.
-
-    Deferred import of `settings` avoids a circular import between security.py
-    and config.py at module load time.
-    """
+    """FastAPI dependency: extrae y valida el user_id del header Authorization."""
     if not authorization:
         raise HTTPException(status_code=401, detail="Missing authorization header")
 

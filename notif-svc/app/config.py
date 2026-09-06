@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     CONSUL_HOST: str
     CONSUL_PORT: int
 
+    # --- JWT (Task 4 — solo se usa para validar el token en GET /notifications/user/{id}) ---
+    JWT_SECRET_KEY: str
+    JWT_ALGORITHM: str
+
     # --- Service identity ---
     SERVICE_NAME: str = "notif-svc"
     SERVICE_HOST: str = "notif-svc"
