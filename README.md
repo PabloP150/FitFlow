@@ -57,6 +57,23 @@ FitFlow es un sistema de microservicios construido con Python + FastAPI, que dem
 - **Database per Service**: cada microservicio es dueño exclusivo de sus datos. Ninguna consulta cruzada de bases de datos.
 - **Descubrimiento dinámico**: los servicios se registran automáticamente en Consul al iniciar y se deregistran al apagarse.
 - **MCP integrado**: agents de IA (Claude Desktop) pueden operar FitFlow en lenguaje natural sin conocer detalles de API.
+- **Resiliencia**: la llamada booking-svc → notif-svc tiene retries con backoff exponencial + jitter, circuit breaker, y un outbox durable — una reserva nunca falla por culpa de notif-svc.
+- **Observabilidad**: logs estructurados en JSON en los 3 servicios, con un `x-correlation-id` propagado de punta a punta.
+- **Seguridad**: JWT validado en todos los endpoints que exponen datos de usuario, con verificación de *ownership* (un usuario solo puede ver/cancelar sus propias reservas y notificaciones).
+
+### Estado del proyecto
+
+| Task | Descripción | Estado |
+|------|-------------|--------|
+| 1 | Microservicios + Docker Compose + Database per Service | ✅ Completado |
+| 2A | Service discovery dinámico con Consul | ✅ Completado |
+| 2B | MCP Server + integración Claude Desktop | ✅ Completado |
+| 3 | Resiliencia (retry/backoff/jitter, circuit breaker, outbox) + Observabilidad (logs JSON, correlation ID) | ✅ Completado |
+| 4 | Seguridad (ownership checks, JWT endurecido) + README + demo automatizado | ✅ Completado |
+| 5 | Agent-to-Agent (Orchestrator/Booking/Notification Agents, Agent Cards) | ⏳ Pendiente |
+| Extra | Despliegue cloud | ⏳ Pendiente |
+
+Ver [`TASKS_ROADMAP.md`](./TASKS_ROADMAP.md) para el detalle de cada task.
 
 ---
 
@@ -173,8 +190,11 @@ curl -X POST http://localhost:8001/bookings \
 
 ### 5. Verificar notificación registrada
 
+Desde Task 4, este endpoint requiere JWT (solo el propio usuario puede ver su historial):
+
 ```bash
-curl http://localhost:8002/notifications/user/1
+curl http://localhost:8002/notifications/user/1 \
+  -H "Authorization: Bearer $TOKEN"
 
 # Respuesta:
 # [
@@ -187,6 +207,23 @@ curl http://localhost:8002/notifications/user/1
 #     "created_at": "2026-08-23T10:35:00"
 #   }
 # ]
+
+# Sin token -> 401. Con el token de OTRO usuario -> 403.
+```
+
+### 6. Ver el `x-correlation-id` de la reserva
+
+Toda respuesta trae un header `x-correlation-id` (generado si el caller no mandó uno). El mismo id se propaga a la llamada saliente booking-svc → notif-svc y aparece en los logs JSON de ambos servicios — útil para rastrear una operación de punta a punta:
+
+```bash
+curl -i -X POST http://localhost:8001/bookings \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"class_id": 1}' | grep -i x-correlation-id
+
+# x-correlation-id: 2382b2a6-633c-499b-b927-5f2a54584394
+
+docker compose logs booking-svc | grep "2382b2a6-633c-499b-b927-5f2a54584394"
 ```
 
 ---
@@ -288,14 +325,15 @@ CREATE TABLE users (
 **Endpoints:**
 - `GET /classes` — Listar clases disponibles con cupo
 - `POST /bookings` — Crear reserva (requiere JWT)
-- `GET /bookings/{id}` — Obtener detalles de una reserva
-- `POST /bookings/{id}/cancel` — Cancelar reserva (soft-cancel, requiere JWT)
+- `GET /bookings/{id}` — Obtener detalles de una reserva (requiere JWT, solo el dueño)
+- `POST /bookings/{id}/cancel` — Cancelar reserva (soft-cancel, requiere JWT, solo el dueño)
 - `GET /healthz`, `GET /readyz`
 
-**Autenticación:**
-- Valida JWT en endpoints protegidos (`POST /bookings`, `POST /bookings/{id}/cancel`)
+**Autenticación (Task 4):**
+- Valida JWT en todos los endpoints de `bookings` (`GET`, `POST`, `POST .../cancel`)
 - Extrae `user_id` del payload del JWT
-- Si token inválido/expirado → 401 Unauthorized
+- Si token inválido/expirado/malformado → 401 Unauthorized (incluye tokens con firma válida pero payload incompleto — `security.py` captura tanto `jwt.InvalidTokenError` como `pydantic.ValidationError`)
+- **Ownership**: si `booking.user_id != user_id` del token → 403 Forbidden (un usuario no puede ver ni cancelar la reserva de otro)
 
 **Base de datos (booking_db):**
 ```sql
@@ -315,13 +353,27 @@ CREATE TABLE bookings (
   created_at TIMESTAMP DEFAULT NOW(),
   FOREIGN KEY (class_id) REFERENCES classes(id)
 );
+
+-- Task 3: outbox de notificaciones (ver seccion "Resiliencia")
+CREATE TABLE pending_notifications (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  type VARCHAR NOT NULL,
+  message VARCHAR NOT NULL,
+  booking_id INTEGER,
+  correlation_id VARCHAR,
+  attempts INTEGER DEFAULT 0,
+  status VARCHAR DEFAULT 'pending',  -- pending | sent | failed
+  created_at TIMESTAMP DEFAULT NOW(),
+  last_attempt_at TIMESTAMP
+);
 ```
 
 **Integración con notif-svc:**
-- Al crear una reserva exitosa, booking-svc llama internamente a `POST notif-svc/notifications`
+- Al crear/cancelar una reserva, booking-svc llama internamente a `POST notif-svc/notifications`
 - En Task 1: la URL de notif-svc está **hardcodeada** como `http://notif-svc:8002` (nombre lógico docker-compose)
 - En Task 2A: se reemplaza por **Consul discovery** vía `discovery.py`
-- Si notif-svc no responde: se loguea el error pero la reserva se crea igualmente (resiliencia robusta es Task 3)
+- Desde Task 3: la llamada es resiliente (ver sección "Resiliencia" más abajo) — una reserva **nunca** falla por culpa de notif-svc, aunque esté caído
 
 **Seed de clases:**
 Al iniciar, si no hay clases en la BD, se insertan 4 automáticamente:
@@ -335,8 +387,8 @@ Al iniciar, si no hay clases en la BD, se insertan 4 automáticamente:
 ### notif-svc (8002)
 
 **Endpoints:**
-- `POST /notifications` — Registrar una notificación
-- `GET /notifications/user/{user_id}` — Obtener historial de notificaciones de un usuario
+- `POST /notifications` — Registrar una notificación (llamado internamente por booking-svc, sin auth de usuario final — es tráfico servicio-a-servicio)
+- `GET /notifications/user/{user_id}` — Obtener historial de notificaciones de un usuario (requiere JWT, Task 4; ownership: solo el propio usuario puede ver su historial → 403 si el token es de otro usuario)
 - `GET /healthz`, `GET /readyz`
 
 **Campos de notificación:**
@@ -359,8 +411,8 @@ CREATE TABLE notifications (
 
 **Por ahora:**
 - Las notificaciones se guardan en la BD (no se envía email ni SMS real)
-- Pueden consultarse después con la API
-- En Task 3 se añadirá resiliencia; en un sistema real podría integrarse con Twilio, SendGrid, etc.
+- Pueden consultarse después con la API (con JWT propio)
+- En un sistema real podría integrarse con Twilio, SendGrid, etc.
 
 ---
 
@@ -451,6 +503,114 @@ Abre `http://localhost:8500` en el navegador:
 
 ---
 
+## Resiliencia (Task 3)
+
+La llamada booking-svc → notif-svc combina tres mecanismos complementarios, implementados en `booking-svc/app/resilience.py` y `booking-svc/app/outbox.py`:
+
+### 1. Retry con backoff exponencial + jitter (`tenacity`)
+
+Cada llamada HTTP a notif-svc se reintenta hasta 3 veces si falla por timeout, error de red, o respuesta 5xx, esperando cada vez un poco más (con aleatoriedad/jitter para que varios requests no reintenten todos al mismo instante):
+
+```python
+@retry(
+    reraise=True,
+    stop=stop_after_attempt(3),
+    wait=wait_exponential_jitter(initial=0.5, max=4),
+    retry=retry_if_exception_type(NotifServiceError),
+)
+async def call_notif_service(url, payload, headers): ...
+```
+
+### 2. Circuit breaker (`circuitbreaker`)
+
+Si las llamadas siguen fallando después de agotar los reintentos, el circuito se **abre**: las siguientes llamadas fallan de inmediato (sin tocar la red) durante `recovery_timeout` (10s), dándole tiempo a notif-svc para recuperarse sin recibir más carga. Pasado ese tiempo, la siguiente llamada actúa como sonda — si tiene éxito, el circuito se cierra de nuevo.
+
+```python
+@circuit(failure_threshold=3, recovery_timeout=10, expected_exception=NotifServiceError)
+@retry(...)
+async def call_notif_service(url, payload, headers): ...
+```
+
+Se distinguen dos tipos de error: `NotifServiceError` (red/timeout/5xx — reintentable, cuenta contra el breaker) y `NotifServiceClientError` (4xx — "nuestra culpa", no se reintenta ni cuenta contra el breaker).
+
+Verificado directamente contra el contenedor real (ver `docker compose exec booking-svc python -c "..."` en el historial de desarrollo): 3 fallos consecutivos abren el circuito, las siguientes llamadas retornan `CircuitBreakerError` en <10ms, y una llamada exitosa después del `recovery_timeout` cierra el circuito de nuevo.
+
+### 3. Outbox pattern (`app/outbox.py`)
+
+Si la llamada falla incluso después de reintentos y/o el circuito está abierto, la notificación **no se pierde**: se guarda como fila `pending` en la tabla `pending_notifications` (booking_db). Un worker en background (lanzado desde el `lifespan` de `main.py`, un `asyncio.create_task`) revisa esa tabla cada 10 segundos y reintenta la entrega usando el mismo `call_notif_service` (retry + circuit breaker incluidos), hasta un máximo de 10 intentos por notificación.
+
+Esto garantiza: **una reserva nunca falla por culpa de notif-svc**, y una notificación tampoco se descarta silenciosamente cuando notif-svc está caído — se entrega en cuanto vuelve a estar sano.
+
+```bash
+# Simular una caída y observar la recuperación automática
+docker compose stop notif-svc
+curl -X POST http://localhost:8001/bookings -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d '{"class_id": 1}'
+# -> sigue devolviendo 201; la notificación queda en pending_notifications
+
+docker compose start notif-svc
+sleep 15   # el outbox worker hace poll cada 10s
+curl http://localhost:8002/notifications/user/1 -H "Authorization: Bearer $TOKEN"
+# -> la notificación ya aparece, entregada por el worker sin intervención manual
+```
+
+`demo.sh` automatiza este flujo completo (ver sección "Demo automatizado").
+
+---
+
+## Observabilidad (Task 3)
+
+### Logs estructurados en JSON
+
+Los 3 servicios (`users-svc`, `booking-svc`, `notif-svc`) configuran `structlog` + el módulo estándar `logging` (`app/logging_config.py`, idéntico en los 3) para que **toda** línea de log del proceso salga como un objeto JSON en stdout — tanto los logs propios como los de librerías (uvicorn, sqlalchemy):
+
+```json
+{"method": "POST", "path": "/bookings", "status_code": 201, "duration_ms": 29.15, "event": "http.request", "correlation_id": "2382b2a6-...", "service": "booking-svc", "level": "info", "logger": "http", "timestamp": "2026-09-06T20:34:38.709230Z"}
+```
+
+Se usa `structlog.stdlib.ProcessorFormatter` (no `JSONRenderer` aplicado directo en `structlog.configure`) para poder formatear consistentemente tanto los logs de structlog como los que emite uvicorn/sqlalchemy vía el módulo `logging`.
+
+### Correlation ID (`x-correlation-id`)
+
+`app/middleware.py` (idéntico en los 3 servicios) define `CorrelationIdMiddleware`:
+
+- Reusa el `x-correlation-id` del caller si viene en el request, o genera un UUID4 nuevo.
+- Lo enlaza a los contextvars de `structlog` (`bind_contextvars`) — así **todo** log emitido durante ese request lo incluye automáticamente, sin pasarlo a mano por cada función.
+- Lo guarda en `request.state.correlation_id` para que los routers lo reenvíen en llamadas salientes (p.ej. booking-svc → notif-svc).
+- Lo devuelve en el header de la respuesta.
+- Emite una línea de log JSON por request (`http.request`: método, path, status, duración).
+
+Esto permite rastrear una misma operación de punta a punta a través de los logs de distintos servicios:
+
+```bash
+docker compose logs booking-svc notif-svc | grep "2382b2a6-633c-499b-b927-5f2a54584394"
+```
+
+---
+
+## Seguridad (Task 4)
+
+- **JWT endurecido** (`booking-svc/app/security.py`, `notif-svc/app/security.py`): `decode_token` captura tanto `jwt.InvalidTokenError` (firma inválida, token expirado/malformado) como `pydantic.ValidationError` (token válido pero con payload incompleto, p.ej. sin `user_id`). Antes de este fix, un token con payload incompleto producía un `500 Internal Server Error` en vez de un `401` consistente.
+- **Ownership checks**:
+  - `GET /bookings/{id}` y `POST /bookings/{id}/cancel` en booking-svc: si `booking.user_id` no coincide con el `user_id` del JWT → `403 Forbidden`.
+  - `GET /notifications/user/{user_id}` en notif-svc: ahora requiere JWT; si el `user_id` del JWT no coincide con el `{user_id}` de la URL → `403 Forbidden`.
+- **Gestión de secretos**: `JWT_SECRET_KEY`, credenciales de base de datos, etc. viven en `.env` (gitignored) y se cargan vía `env_file` en `docker-compose.yml`. `.env.example` documenta las variables requeridas sin exponer secretos reales. Para producción, `JWT_SECRET_KEY` debe rotarse y gestionarse con un secret manager real (AWS Secrets Manager, Vault, etc.), nunca committearse.
+
+---
+
+## Demo automatizado (`demo.sh`)
+
+`demo.sh` corre el flujo end-to-end completo de forma automática y verifica cada paso (health checks, registro/login, listar clases, crear reserva + `x-correlation-id`, historial de notificaciones con JWT, ownership checks con un segundo usuario, y el ciclo completo de resiliencia: detener notif-svc → reintentos/circuit breaker → outbox → reinicio → entrega automática):
+
+```bash
+docker compose up -d --build
+./demo.sh
+```
+
+Imprime `[OK]`/`[FAIL]` por cada verificación y un resumen final. Requiere `curl` y `jq`.
+
+---
+
 ## Flujo end-to-end demostrado
 
 ### Task 1 (Microservicios + Docker)
@@ -501,6 +661,40 @@ Verificación:
 # → Claude llama cancel_booking → marca como cancelled
 ```
 
+### Task 3 (Resiliencia + Observabilidad)
+
+Verificación:
+```bash
+# Logs JSON con correlation_id
+docker compose logs booking-svc | grep '"correlation_id"' | tail -3   # ✓ lineas JSON validas
+
+# Resiliencia: reserva se crea igual aunque notif-svc este caido
+docker compose stop notif-svc
+curl -X POST http://localhost:8001/bookings -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d '{"class_id": 1}'   # ✓ 201, aunque tarde unos segundos (retries)
+
+docker compose start notif-svc
+sleep 15
+curl http://localhost:8002/notifications/user/1 -H "Authorization: Bearer $TOKEN"  # ✓ la notificacion aparece (outbox)
+
+# O simplemente:
+./demo.sh   # corre todo esto automaticamente y verifica cada paso
+```
+
+### Task 4 (Seguridad + README + Demo)
+
+Verificación:
+```bash
+# Ownership: otro usuario no puede ver/cancelar mi reserva
+curl -o /dev/null -w "%{http_code}\n" http://localhost:8001/bookings/1 -H "Authorization: Bearer $OTHER_USER_TOKEN"  # ✓ 403
+
+# Ownership: otro usuario no puede ver mi historial de notificaciones
+curl -o /dev/null -w "%{http_code}\n" http://localhost:8002/notifications/user/1 -H "Authorization: Bearer $OTHER_USER_TOKEN"  # ✓ 403
+
+# Sin token -> 401 consistente (no 500)
+curl -o /dev/null -w "%{http_code}\n" http://localhost:8002/notifications/user/1  # ✓ 401
+```
+
 ---
 
 ## Estructura de carpetas
@@ -512,41 +706,49 @@ Proyecto/
 ├── .env                      # desarrollo local (no se commitea)
 ├── .env.example              # template (sí se commitea)
 ├── README.md                 # este archivo
+├── TASKS_ROADMAP.md          # detalle y estado de cada task (1-5 + extra)
 ├── docker-compose.yml        # orquestación de servicios
+├── demo.sh                   # demo end-to-end automatizada (Task 4)
 │
 ├── users-svc/
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   └── app/
 │       ├── __init__.py
-│       ├── main.py           # FastAPI app + lifespan (register Consul)
+│       ├── main.py            # FastAPI app + lifespan (register Consul, logging)
 │       ├── config.py          # pydantic-settings
 │       ├── database.py        # engine, SessionLocal
 │       ├── models.py          # SQLAlchemy models
 │       ├── schemas.py         # Pydantic schemas
 │       ├── security.py        # bcrypt + JWT
 │       ├── consul_client.py   # registro en Consul
+│       ├── logging_config.py  # logs JSON (Task 3)
+│       ├── middleware.py      # CorrelationIdMiddleware (Task 3)
 │       └── routers/
 │           ├── users.py       # POST/GET endpoints
 │           └── health.py      # /healthz, /readyz
 │
-├── booking-svc/              # estructura similar
+├── booking-svc/              # estructura similar + resiliencia (Task 3)
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   └── app/
-│       ├── main.py
+│       ├── main.py            # + outbox worker en el lifespan
 │       ├── config.py
 │       ├── database.py
-│       ├── models.py
+│       ├── models.py          # + PendingNotification (outbox)
 │       ├── schemas.py
-│       ├── security.py        # JWT validation
+│       ├── security.py        # JWT validation (+ catch ValidationError, Task 4)
 │       ├── consul_client.py
 │       ├── discovery.py       # resolución Consul
-│       ├── notif_client.py    # llamadas a notif-svc
+│       ├── notif_client.py    # llamadas a notif-svc, resiliente
+│       ├── resilience.py      # retry (tenacity) + circuit breaker (Task 3)
+│       ├── outbox.py          # worker en background del outbox (Task 3)
+│       ├── logging_config.py  # logs JSON (Task 3)
+│       ├── middleware.py      # CorrelationIdMiddleware (Task 3)
 │       ├── seed.py            # data seed de clases
 │       └── routers/
 │           ├── classes.py
-│           ├── bookings.py
+│           ├── bookings.py    # + ownership checks (Task 4)
 │           └── health.py
 │
 ├── notif-svc/                # estructura similar
@@ -554,13 +756,16 @@ Proyecto/
 │   ├── requirements.txt
 │   └── app/
 │       ├── main.py
-│       ├── config.py
+│       ├── config.py          # + JWT_* (Task 4)
 │       ├── database.py
 │       ├── models.py
 │       ├── schemas.py
+│       ├── security.py        # JWT validation (Task 4)
 │       ├── consul_client.py
+│       ├── logging_config.py  # logs JSON (Task 3)
+│       ├── middleware.py      # CorrelationIdMiddleware (Task 3)
 │       └── routers/
-│           ├── notifications.py
+│           ├── notifications.py  # GET protegido con JWT + ownership (Task 4)
 │           └── health.py
 │
 └── fitflow-mcp/
@@ -599,18 +804,9 @@ Todas las env vars se cargan automáticamente al iniciar los servicios vía `doc
 
 ---
 
-## Siguientes pasos (Tasks 3-5, futuro)
+## Siguientes pasos (Task 5 + extra, futuro)
 
-### Task 3 — Resiliencia + Observabilidad
-- Implementar timeout/retry/backoff/jitter (librería `tenacity`) en la llamada booking-svc→notif-svc
-- Implementar circuit breaker con `pybreaker`
-- Adoptar logs estructurados (JSON) con `structlog`
-- Propagar `x-correlation-id` entre servicios para rastrabilidad
-
-### Task 4 — Seguridad + README + Demo
-- Endurecimiento de validación JWT (401 consistente, chequeo de ownership)
-- Documentación completa de secretos y rotación de credenciales
-- Video de demostración (5-8 min) mostrando Tasks 1-3
+Tasks 1, 2A, 2B, 3 y 4 están completadas (ver tabla de estado al inicio del README y [`TASKS_ROADMAP.md`](./TASKS_ROADMAP.md)). Lo que queda:
 
 ### Task 5 — Agent-to-Agent (A2A)
 - Introducir Orchestrator Agent, Booking Agent, Notification Agent
@@ -686,6 +882,6 @@ Este es un proyecto de Postgrado en Diseño y Desarrollo de Software, Universida
 
 ---
 
-**Última actualización**: Agosto 2026  
-**Status**: Task 1 & 2 funcionales (🚀 Ready for demo)  
-**Roadmap**: Tasks 3, 4, 5 en construcción...
+**Última actualización**: Septiembre 2026
+**Status**: Tasks 1, 2A, 2B, 3 y 4 completadas y verificadas end-to-end (🚀 Ready for demo)
+**Roadmap**: Task 5 (Agent-to-Agent) y despliegue cloud pendientes — ver [`TASKS_ROADMAP.md`](./TASKS_ROADMAP.md)
