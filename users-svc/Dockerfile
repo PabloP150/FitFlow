@@ -1,5 +1,10 @@
 FROM python:3.12-slim
 
+# Sin esto, los print()/logs quedan bufferizados y no aparecen en
+# `docker compose logs -f` hasta que el buffer se llena (stdout no es un
+# TTY dentro del contenedor).
+ENV PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
 COPY requirements.txt .

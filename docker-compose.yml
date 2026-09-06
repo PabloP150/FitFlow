@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # ============================================
   # PostgreSQL Databases (Task 1)
@@ -86,7 +84,6 @@ services:
       SERVICE_PORT: "8003"
       CONSUL_HOST: ${CONSUL_HOST}
       CONSUL_PORT: ${CONSUL_PORT}
-      DATABASE_URL: postgresql+psycopg2://${USERS_DB_USER}:${USERS_DB_PASSWORD}@users-db:5432/${USERS_DB_NAME}
     depends_on:
       users-db:
         condition: service_healthy
@@ -109,7 +106,6 @@ services:
       SERVICE_PORT: "8001"
       CONSUL_HOST: ${CONSUL_HOST}
       CONSUL_PORT: ${CONSUL_PORT}
-      DATABASE_URL: postgresql+psycopg2://${BOOKING_DB_USER}:${BOOKING_DB_PASSWORD}@booking-db:5432/${BOOKING_DB_NAME}
     depends_on:
       booking-db:
         condition: service_healthy
@@ -134,7 +130,6 @@ services:
       SERVICE_PORT: "8002"
       CONSUL_HOST: ${CONSUL_HOST}
       CONSUL_PORT: ${CONSUL_PORT}
-      DATABASE_URL: postgresql+psycopg2://${NOTIF_DB_USER}:${NOTIF_DB_PASSWORD}@notif-db:5432/${NOTIF_DB_NAME}
     depends_on:
       notif-db:
         condition: service_healthy

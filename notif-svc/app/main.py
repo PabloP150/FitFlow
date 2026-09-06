@@ -1,11 +1,17 @@
 from contextlib import asynccontextmanager
 
+import structlog
 from fastapi import FastAPI
 
 from app.config import settings
 from app.consul_client import deregister_service, register_service
 from app.database import Base, engine
+from app.logging_config import configure_logging
+from app.middleware import CorrelationIdMiddleware
 from app.routers import health, notifications
+
+configure_logging(settings.SERVICE_NAME)
+logger = structlog.get_logger(settings.SERVICE_NAME)
 
 
 @asynccontextmanager
@@ -17,21 +23,22 @@ async def lifespan(app: FastAPI):
     Base.metadata.create_all(engine)
     try:
         register_service(settings)
-        print(f"[{settings.SERVICE_NAME}] Registered in Consul")
+        logger.info("consul.registered")
     except Exception as e:
-        print(f"[{settings.SERVICE_NAME}] Failed to register in Consul: {e}")
+        logger.warning("consul.register_failed", error=str(e))
 
     yield
 
     # Shutdown
     try:
         deregister_service(settings)
-        print(f"[{settings.SERVICE_NAME}] Deregistered from Consul")
+        logger.info("consul.deregistered")
     except Exception as e:
-        print(f"[{settings.SERVICE_NAME}] Failed to deregister: {e}")
+        logger.warning("consul.deregister_failed", error=str(e))
 
 
 app = FastAPI(title=settings.SERVICE_NAME, lifespan=lifespan)
+app.add_middleware(CorrelationIdMiddleware)
 
 app.include_router(notifications.router)
 app.include_router(health.router)

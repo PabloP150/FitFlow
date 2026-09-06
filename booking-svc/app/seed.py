@@ -1,8 +1,11 @@
 from datetime import datetime, timedelta
 
+import structlog
 from sqlalchemy.orm import Session
 
 from .models import FitnessClass
+
+logger = structlog.get_logger("booking-svc.seed")
 
 SEED_CLASSES = [
     {"name": "Yoga Matutino", "description": "Yoga suave para principiantes", "capacity": 20},
@@ -31,4 +34,4 @@ def seed_classes(db: Session):
 
     db.add_all(classes)
     db.commit()
-    print(f"[seed] Inserted {len(classes)} fitness classes")
+    logger.info("seed.classes_inserted", count=len(classes))

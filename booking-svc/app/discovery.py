@@ -1,6 +1,9 @@
 import consul as consul_lib
+import structlog
 
 from .config import settings
+
+logger = structlog.get_logger("booking-svc.discovery")
 
 
 def get_consul() -> consul_lib.Consul:
@@ -18,5 +21,5 @@ def get_service_url(service_name: str) -> str:
         entry = services[0]["Service"]
         return f"http://{entry['Address']}:{entry['Port']}"
     except Exception as e:
-        print(f"[discovery] Error resolving {service_name}: {e}")
+        logger.warning("discovery.resolve_failed", service=service_name, error=str(e))
         raise
