@@ -11,7 +11,7 @@ Proyecto de Postgrado en Diseño y Desarrollo de Software, Universidad Galileo. 
 | 2B | MCP Server (`fitflow-mcp`) + integración Claude Desktop (3 tools) | ✅ Completado | 3 tools visibles en Claude Desktop; conversaciones de ejemplo en `README.md` |
 | 3 | Resiliencia (retry+backoff+jitter, circuit breaker, outbox pattern) + Observabilidad (logs JSON, `x-correlation-id`) | ✅ Completado | `./demo.sh`; ver detalle abajo |
 | 4 | Seguridad (ownership checks, JWT endurecido) + README + demo automatizado | ✅ Completado | `./demo.sh`; ver detalle abajo |
-| 5 | Agent-to-Agent (Orchestrator/Booking/Notification Agents, Agent Cards) | ⏳ Pendiente | — |
+| 5 | Agent-to-Agent (Orchestrator/Booking/Notification Agents, Agent Cards) | ✅ Completado | `./demo_a2a.sh`; ver detalle abajo |
 | Extra | Despliegue cloud (+15 pts) | ⏳ Pendiente | — |
 
 ---
@@ -71,12 +71,52 @@ Proyecto de Postgrado en Diseño y Desarrollo de Software, Universidad Galileo. 
 
 ---
 
-## Task 5 — Agent-to-Agent (A2A) [pendiente]
+## Task 5 — Agent-to-Agent (A2A)
 
-- Introducir Orchestrator Agent, Booking Agent, Notification Agent.
-- Cada agente publica un Agent Card en `/.well-known/agent.json`.
-- Agentes se descubren entre sí vía Agent Cards (análogo a Consul, pero para agentes).
-- Demostración: Claude Desktop → Orchestrator Agent → Booking/Notification Agents → servicios reales.
+**Objetivo**: reemplazar la interacción directa usuario → MCP por una red de agentes especializados que se descubren vía Agent Card y se delegan trabajo vía el protocolo A2A.
+
+**Entregables**:
+- [x] `booking-agent/` (:9001) — servidor A2A con skills `list_classes`, `create_booking`, `cancel_booking`
+- [x] `notification-agent/` (:9002) — servidor A2A con skills `send_notification`, `get_history`
+- [x] `orchestrator-agent/` (:9000) — cliente A2A: descubre agentes, consulta a Gemini, delega en secuencia
+- [x] Agent Cards servidos en `/.well-known/agent.json` (ruta del enunciado) **y** `/.well-known/agent-card.json` (default del SDK en A2A v1.0)
+- [x] `{booking,notification}-agent/app/executor.py` — `AgentExecutor` que traduce cada skill en llamadas a tools del MCP Server
+- [x] `{booking,notification}-agent/app/mcp_client.py` — cliente MCP streamable-http contra `fitflow-mcp`, con retry `tenacity`
+- [x] `orchestrator-agent/app/nlu_gemini.py` — construye function declarations de Gemini a partir de las skills **descubiertas**, con automatic function calling desactivado
+- [x] `orchestrator-agent/app/a2a_dispatch.py` — delegación A2A + logs de comunicación entre agentes
+- [x] `orchestrator-agent/app/consul_publish.py` + `static/index.html` — dashboard con el botón "Descubrir agentes vía Agent Card" que los publica en Consul (y "Reiniciar demo" que los da de baja)
+- [x] `fitflow-mcp/app/tools.py` — 2 tools nuevas (`send_notification`, `get_notification_history`), registradas en ambos transportes
+- [x] `docker-compose.yml` — 3 contenedores nuevos; `fitflow-mcp` deja de estar tras `profiles: ["http"]`
+- [x] `demo_a2a.sh` — demo automatizada de toda la task
+- [x] `README.md` — sección "Agent-to-Agent" explicando MCP vs A2A
+
+**Verificación realizada**:
+1. Los 3 agentes corren como contenedores y responden `/healthz` (11 contenedores en total con `docker compose up`).
+2. Agent Cards servidos correctamente en ambas rutas; `skills[].id` coincide con lo esperado.
+3. Contraste Consul: antes del botón, `catalog/services` lista solo los 4 servicios de infraestructura; tras `POST /agents/discover`, aparecen `booking-agent` y `notification-agent` con tag `a2a-agent`, y a los ~10s pasan a `passing` (verde).
+4. Cadena A2A → MCP → microservicio probada en vivo: `list_classes` delegada al Booking Agent devolvió las 4 clases reales de booking-svc.
+5. Encadenamiento secuencial probado: `create_booking` → el `user_id`/`booking_id` del resultado se inyectan en `send_notification`. Verificado independientemente que la reserva existe en booking-svc y la notificación en notif-svc.
+6. Logs JSON con eventos `a2a.delegate.send` / `a2a.delegate.result` / `a2a.task_received` / `a2a.task_completed`, con `correlation_id` propagado.
+7. Flujo completo del enunciado verificado con Gemini real: `"Reserva yoga para el viernes y avisame por notificacion"` → Gemini emite 2 function calls (`create_booking` con el `class_id` correcto de Yoga Matutino, luego `send_notification`) → ambas delegadas a sus agentes → `./demo_a2a.sh` termina con 0 fallos.
+
+**Decisiones de diseño**:
+- **SDK oficial** `a2a-sdk==1.1.2` (protocolo A2A v1.0), no una implementación propia. En v1.0 el `AgentCard` no tiene campo `url` plano: la URL vive en `supported_interfaces` junto al binding de protocolo. El card se sirve en dos rutas para cumplir tanto con el enunciado como con el default del SDK.
+- **Los agentes usan MCP de verdad**, como clientes streamable-http contra `fitflow-mcp`, en vez de importar `tools.py` en proceso — que es lo que pide literalmente el enunciado ("internamente usa el MCP Server de FitFlow").
+- **Los agentes NO se auto-registran en Consul**: el descubrimiento entre agentes es por Agent Card. El botón del dashboard hace *third-party registration* en Consul después de descubrirlos, para que la diferencia entre ambos mecanismos sea visible en la demo. (La UI de Consul es una SPA compilada dentro de su imagen y no admite botones propios; de ahí el dashboard propio.)
+- **Gemini solo decide, no ejecuta**: automatic function calling va desactivado; la ejecución real la hace el dispatch A2A contra el agente remoto. Las credenciales y los ids derivados nunca se le piden a Gemini — los inyecta el Orchestrator.
+- El `AgentSkill` de A2A no declara esquema de argumentos, así que el Orchestrator aporta uno por skill para Gemini. El descubrimiento de qué agentes y skills existen sigue siendo 100% dinámico.
+- Se añadió la skill `list_classes` (no pedida explícitamente) porque sin ella Gemini no puede mapear "yoga" a un `class_id` real sin inventárselo.
+
+**Robustez del NLU**:
+- El system instruction tuvo que ser explicito en que `create_booking` NO notifica por si sola: sin esa aclaracion, Gemini asumia que la reserva ya avisaba al usuario y emitia una sola function call en vez de dos.
+- Las llamadas a Gemini se reintentan con backoff (`tenacity`, 4 intentos) ante errores transitorios (`503 UNAVAILABLE` por sobrecarga del modelo, `429`), que aparecen de forma intermitente y si no tumbarian la demo.
+
+**Bugs encontrados y corregidos en el camino**:
+- `fitflow-mcp/Dockerfile` ejecutaba `app.server` (stdio) en vez de `app.server_http`: el perfil HTTP nunca había servido HTTP realmente.
+- FastMCP devuelve una lista como *un bloque de contenido por elemento*, no como un array JSON: la primera versión del parser devolvía solo la primera clase de cuatro.
+- Los data parts de A2A viajan como `protobuf.Value`, que representa todo número como `double` — los ids llegan como `1.0` y hay que coercionarlos a `int` antes de pasarlos a las tools MCP, o los servicios responden 422.
+
+**Requisito de entorno**: `GEMINI_API_KEY` en `.env` (gitignored) para el paso de lenguaje natural. El resto del flujo — Agent Cards, descubrimiento, publicacion en Consul y delegacion A2A — corre sin ella.
 
 ## Punto extra — Despliegue cloud [pendiente]
 

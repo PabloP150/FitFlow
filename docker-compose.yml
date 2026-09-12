@@ -144,7 +144,7 @@ services:
       - fitflow-net
 
   # ============================================
-  # MCP Server (Task 2B, optional HTTP profile)
+  # MCP Server (Task 2B; transporte HTTP consumido por los agentes en Task 5)
   # ============================================
 
   fitflow-mcp:
@@ -158,8 +158,82 @@ services:
       MCP_RUN_MODE: docker
     depends_on:
       - consul
-    profiles:
-      - "http"
+    networks:
+      - fitflow-net
+
+  # ============================================
+  # Agentes A2A (Task 5)
+  #
+  # No se registran en Consul al arrancar: se descubren entre si via
+  # Agent Card (/.well-known/agent.json). El dashboard del orchestrator
+  # tiene un boton que los descubre y *entonces* los publica en Consul.
+  # ============================================
+
+  booking-agent:
+    build: ./booking-agent
+    ports:
+      - "9001:9001"
+    env_file: .env
+    environment:
+      SERVICE_NAME: booking-agent
+      SERVICE_HOST: booking-agent
+      SERVICE_PORT: "9001"
+      MCP_SERVER_URL: http://fitflow-mcp:8000/mcp
+    depends_on:
+      - fitflow-mcp
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9001/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - fitflow-net
+
+  notification-agent:
+    build: ./notification-agent
+    ports:
+      - "9002:9002"
+    env_file: .env
+    environment:
+      SERVICE_NAME: notification-agent
+      SERVICE_HOST: notification-agent
+      SERVICE_PORT: "9002"
+      MCP_SERVER_URL: http://fitflow-mcp:8000/mcp
+    depends_on:
+      - fitflow-mcp
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9002/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - fitflow-net
+
+  orchestrator-agent:
+    build: ./orchestrator-agent
+    ports:
+      - "9000:9000"
+    env_file: .env
+    environment:
+      SERVICE_NAME: orchestrator-agent
+      SERVICE_HOST: orchestrator-agent
+      SERVICE_PORT: "9000"
+      CONSUL_HOST: ${CONSUL_HOST}
+      CONSUL_PORT: ${CONSUL_PORT}
+      BOOKING_AGENT_URL: http://booking-agent:9001
+      NOTIFICATION_AGENT_URL: http://notification-agent:9002
+    depends_on:
+      booking-agent:
+        condition: service_healthy
+      notification-agent:
+        condition: service_healthy
+      consul:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
     networks:
       - fitflow-net
 

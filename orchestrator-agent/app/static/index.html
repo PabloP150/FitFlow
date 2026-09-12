@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FitFlow — Orchestrator Agent</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --ink: #14171f;
+    --muted: #5c6472;
+    --line: #e2e6ec;
+    --accent: #3b5bdb;
+    --ok: #2b8a3e;
+    --warn: #b45309;
+    --code-bg: #f1f3f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171f;
+      --panel: #1c2029;
+      --ink: #e8ebf0;
+      --muted: #9aa3b2;
+      --line: #2a2f3a;
+      --accent: #748ffc;
+      --ok: #51cf66;
+      --warn: #fcc419;
+      --code-bg: #11141b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2rem 1.25rem 4rem;
+    background: var(--bg); color: var(--ink);
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  header { margin-bottom: 1.75rem; }
+  h1 { font-size: 1.5rem; margin: 0 0 .35rem; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); margin: 0; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 1.25rem; margin-bottom: 1.25rem;
+  }
+  h2 { font-size: 1rem; margin: 0 0 .5rem; }
+  .hint { color: var(--muted); font-size: .875rem; margin: 0 0 1rem; }
+  button {
+    font: inherit; font-weight: 600; cursor: pointer;
+    background: var(--accent); color: #fff; border: 0;
+    border-radius: 7px; padding: .6rem 1.1rem;
+  }
+  button:disabled { opacity: .55; cursor: progress; }
+  button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+  input, textarea {
+    font: inherit; width: 100%; padding: .55rem .7rem; color: var(--ink);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 7px;
+  }
+  .row { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: .6rem; margin-bottom: .6rem; }
+  @media (max-width: 560px) { .grid2 { grid-template-columns: 1fr; } }
+  label { display: block; font-size: .8rem; color: var(--muted); margin-bottom: .2rem; }
+  .agent { border: 1px solid var(--line); border-radius: 8px; padding: .8rem 1rem; margin-top: .75rem; }
+  .agent h3 { margin: 0 0 .15rem; font-size: .95rem; }
+  .agent .url { color: var(--muted); font-size: .8rem; font-family: ui-monospace, monospace; }
+  .skill { display: inline-block; background: var(--code-bg); border-radius: 5px;
+           padding: .15rem .5rem; margin: .35rem .3rem 0 0; font-size: .8rem;
+           font-family: ui-monospace, monospace; }
+  pre { background: var(--code-bg); border-radius: 7px; padding: .8rem;
+        overflow-x: auto; font-size: .8rem; margin: .75rem 0 0; }
+  .status { margin-top: .85rem; font-size: .875rem; }
+  .status.ok { color: var(--ok); }
+  .status.err { color: var(--warn); }
+  a { color: var(--accent); }
+  .note { font-size: .82rem; color: var(--muted); border-left: 2px solid var(--line);
+          padding-left: .75rem; margin-top: 1rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>FitFlow — Orchestrator Agent</h1>
+    <p class="sub">Red de agentes A2A · Task 5</p>
+  </header>
+
+  <section class="card">
+    <h2>1 · Descubrimiento por Agent Card</h2>
+    <p class="hint">
+      Los agentes <strong>no</strong> se registran solos en Consul. Se descubren
+      leyendo su Agent Card en <code>/.well-known/agent.json</code> — el
+      equivalente, para agentes, de lo que Consul es para microservicios.
+      Al pulsar el boton se descubren y <em>entonces</em> se publican en Consul.
+    </p>
+    <div class="row">
+      <button id="discover">Descubrir agentes via Agent Card</button>
+      <a class="row" href="http://localhost:8500/ui/dc1/services" target="_blank" rel="noopener">
+        <button class="secondary" type="button">Ver en Consul UI &rarr;</button>
+      </a>
+      <button class="secondary" id="reset" type="button"
+              title="Quita los agentes de Consul para volver a demostrar el descubrimiento">
+        Reiniciar demo
+      </button>
+    </div>
+    <div id="discoverStatus" class="status"></div>
+    <div id="agents"></div>
+    <p class="note">
+      Tip para la demo: abre primero la UI de Consul y comprueba que
+      <code>booking-agent</code> y <code>notification-agent</code> no aparecen.
+      Pulsa el boton, recarga Consul, y ahi estan — en verde.
+    </p>
+  </section>
+
+  <section class="card">
+    <h2>2 · Instruccion en lenguaje natural</h2>
+    <p class="hint">
+      Gemini decide que skills invocar y en que orden; el Orchestrator las
+      delega a los agentes por protocolo A2A.
+    </p>
+    <div class="grid2">
+      <div>
+        <label for="email">Email</label>
+        <input id="email" type="email" value="alice@example.com" autocomplete="username">
+      </div>
+      <div>
+        <label for="password">Password</label>
+        <input id="password" type="password" value="secret123" autocomplete="current-password">
+      </div>
+    </div>
+    <label for="instruction">Instruccion</label>
+    <textarea id="instruction" rows="2">Reserva yoga para el viernes y avisame por notificacion</textarea>
+    <div class="row" style="margin-top:.7rem">
+      <button id="send">Ejecutar</button>
+    </div>
+    <div id="instructStatus" class="status"></div>
+    <pre id="instructOut" hidden></pre>
+  </section>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+$('discover').addEventListener('click', async () => {
+  const btn = $('discover'), status = $('discoverStatus'), list = $('agents');
+  btn.disabled = true;
+  status.className = 'status';
+  status.textContent = 'Leyendo Agent Cards...';
+  list.innerHTML = '';
+  try {
+    const res = await fetch('/agents/discover', { method: 'POST' });
+    const data = await res.json();
+    const agents = data.discovered || [];
+    if (!agents.length) {
+      status.className = 'status err';
+      status.textContent = 'No se descubrio ningun agente. Estan corriendo booking-agent y notification-agent?';
+      return;
+    }
+    for (const a of agents) {
+      const el = document.createElement('div');
+      el.className = 'agent';
+      const skills = (a.skills || []).map(s =>
+        `<span class="skill" title="${escapeHtml(s.description || '')}">${escapeHtml(s.id)}</span>`
+      ).join('');
+      el.innerHTML =
+        `<h3>${escapeHtml(a.name)}</h3>` +
+        `<div class="url">${escapeHtml(a.card_url)}</div>` +
+        `<div>${escapeHtml(a.description || '')}</div>` +
+        `<div>${skills}</div>`;
+      list.appendChild(el);
+    }
+    const published = (data.published_to_consul || [])
+      .filter(p => !p.error).map(p => p.service);
+    status.className = 'status ok';
+    status.textContent =
+      `${agents.length} agente(s) descubierto(s). Publicados en Consul: ` +
+      (published.join(', ') || 'ninguno') + '.';
+  } catch (e) {
+    status.className = 'status err';
+    status.textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('reset').addEventListener('click', async () => {
+  const btn = $('reset'), status = $('discoverStatus');
+  btn.disabled = true;
+  status.className = 'status';
+  status.textContent = 'Quitando agentes de Consul...';
+  $('agents').innerHTML = '';
+  try {
+    const res = await fetch('/agents/reset', { method: 'POST' });
+    const data = await res.json();
+    const removed = data.removed_from_consul || [];
+    status.className = 'status ok';
+    status.textContent = removed.length
+      ? `Consul limpio (${removed.join(', ')} dados de baja). Recarga la UI de Consul y vuelve a pulsar "Descubrir".`
+      : 'No habia agentes registrados en Consul.';
+  } catch (e) {
+    status.className = 'status err';
+    status.textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('send').addEventListener('click', async () => {
+  const btn = $('send'), status = $('instructStatus'), out = $('instructOut');
+  btn.disabled = true;
+  status.className = 'status';
+  status.textContent = 'Consultando a Gemini y delegando a los agentes...';
+  out.hidden = true;
+  try {
+    const res = await fetch('/instruct', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        instruction: $('instruction').value,
+        email: $('email').value,
+        password: $('password').value,
+      }),
+    });
+    const data = await res.json();
+    out.textContent = JSON.stringify(data, null, 2);
+    out.hidden = false;
+    status.className = res.ok ? 'status ok' : 'status err';
+    status.textContent = data.summary || data.error || `HTTP ${res.status}`;
+  } catch (e) {
+    status.className = 'status err';
+    status.textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+</script>
+</body>
+</html>

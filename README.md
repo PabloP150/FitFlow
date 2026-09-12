@@ -49,8 +49,11 @@ FitFlow es un sistema de microservicios construido con Python + FastAPI, que dem
 | users-svc | 8003 | Registro, login (JWT), perfil | users_db (PostgreSQL) |
 | booking-svc | 8001 | Clases, reservas, cancelaciones | booking_db (PostgreSQL) |
 | notif-svc | 8002 | Notificaciones, historial | notif_db (PostgreSQL) |
-| fitflow-mcp | stdio (local) | MCP server para Claude Desktop | — |
+| fitflow-mcp | 8000 (+ stdio local) | MCP server (Claude Desktop vía stdio; agentes vía HTTP) | — |
 | consul | 8500 | Service registry, discovery | — |
+| orchestrator-agent | 9000 | Agente orquestador A2A + dashboard (Task 5) | — |
+| booking-agent | 9001 | Agente especialista en reservas (Task 5) | — |
+| notification-agent | 9002 | Agente especialista en notificaciones (Task 5) | — |
 
 ### Principios
 
@@ -70,7 +73,7 @@ FitFlow es un sistema de microservicios construido con Python + FastAPI, que dem
 | 2B | MCP Server + integración Claude Desktop | ✅ Completado |
 | 3 | Resiliencia (retry/backoff/jitter, circuit breaker, outbox) + Observabilidad (logs JSON, correlation ID) | ✅ Completado |
 | 4 | Seguridad (ownership checks, JWT endurecido) + README + demo automatizado | ✅ Completado |
-| 5 | Agent-to-Agent (Orchestrator/Booking/Notification Agents, Agent Cards) | ⏳ Pendiente |
+| 5 | Agent-to-Agent (Orchestrator/Booking/Notification Agents, Agent Cards) | ✅ Completado |
 | Extra | Despliegue cloud | ⏳ Pendiente |
 
 Ver [`TASKS_ROADMAP.md`](./TASKS_ROADMAP.md) para el detalle de cada task.
@@ -416,18 +419,18 @@ CREATE TABLE notifications (
 
 ---
 
-### fitflow-mcp (stdio, perfil docker opcional)
+### fitflow-mcp (stdio + HTTP)
 
 **Transporte:**
-- **Primario (Task 2B)**: stdio local, para integración con Claude Desktop
+- **stdio (Task 2B)**: para integración con Claude Desktop
   - Se ejecuta como proceso Python normal en la máquina del usuario
   - Claude Desktop se conecta vía stdio
   - Configurable en `claude_desktop_config.json`
-  
-- **Alternativo (futuro)**: HTTP dentro de docker-compose (perfil `profiles: ["http"]`)
-  - Permite que otros clientes MCP remotos se conecten (ej. otros agentes)
-  - Se corre como `docker compose --profile http up`
-  - Puerto 8000
+
+- **streamable-http (Task 2B/5)**: dentro de docker-compose, puerto 8000, endpoint `/mcp`
+  - Desde Task 5 arranca por defecto (antes estaba tras `profiles: ["http"]`)
+  - Es el transporte que usan `booking-agent` y `notification-agent` como
+    clientes MCP para ejecutar acciones reales
 
 **Herramientas (tools):**
 
@@ -446,12 +449,179 @@ CREATE TABLE notifications (
    - `POST booking-svc/bookings/{id}/cancel` con el JWT
    - Devuelve la reserva cancelada
 
+4. **send_notification(user_id, type, message, booking_id=None)** (Task 5) → `POST notif-svc/notifications`
+   - Tráfico servicio-a-servicio, sin JWT
+   - La usa `notification-agent`
+
+5. **get_notification_history(user_id, email, password)** (Task 5) → secuencia:
+   - Login en users-svc → obtiene JWT
+   - `GET notif-svc/notifications/user/{user_id}` con el JWT (ownership-checked)
+
 **Discovery de servicios en MCP Server:**
 - Al iniciar, carga config desde env vars: `CONSUL_HOST`, `CONSUL_PORT`, `MCP_RUN_MODE`
 - Si `MCP_RUN_MODE=local`: reescribe hostnames docker a `localhost` (resueltos en el host)
 - Si `MCP_RUN_MODE=docker`: usa hostnames directos (para cuando el server corre dentro de docker-compose)
 - Consulta a Consul: `consul.health.service("booking-svc", passing=True)` → obtiene URL actual
 - Sin caché (volumen bajo)
+
+---
+
+## Agent-to-Agent (Task 5)
+
+### MCP vs A2A — la diferencia
+
+Son protocolos complementarios que resuelven preguntas distintas:
+
+| | **MCP** (Task 2B) | **A2A** (Task 5) |
+|---|---|---|
+| Pregunta que responde | ¿Cómo un agente usa un **sistema externo**? | ¿Cómo un agente **delega trabajo a otro agente**? |
+| Dirección | Vertical: agente → herramientas | Horizontal: agente → agente |
+| Descubrimiento | El server declara sus `tools` | Cada agente publica un **Agent Card** |
+| En FitFlow | `fitflow-mcp` expone 5 tools | 3 agentes que se delegan skills entre sí |
+
+La analogía con el resto del sistema es directa: **Consul es a los microservicios lo que el Agent Card es a los agentes** — un mecanismo de descubrimiento, pero de capacidades en vez de endpoints.
+
+### Arquitectura
+
+```
+Usuario: "Reserva yoga para el viernes y avísame por notificación"
+   │ HTTP (dashboard o POST /instruct)
+   ↓
+┌──────────────────────────────────────┐
+│  orchestrator-agent :9000            │
+│  - Descubre agentes vía Agent Card   │
+│  - Gemini decide qué skills invocar  │
+│  - Delega en secuencia por A2A       │
+└───────┬──────────────────────┬───────┘
+        │ A2A (JSON-RPC)       │ A2A (JSON-RPC)
+        ↓                      ↓
+┌──────────────────┐   ┌────────────────────────┐
+│ booking-agent    │   │ notification-agent     │
+│ :9001            │   │ :9002                  │
+│ list_classes     │   │ send_notification      │
+│ create_booking   │   │ get_history            │
+│ cancel_booking   │   │                        │
+└────────┬─────────┘   └───────────┬────────────┘
+         │ MCP (streamable-http)   │ MCP
+         └───────────┬─────────────┘
+                     ↓
+            ┌──────────────────┐
+            │  fitflow-mcp     │  :8000/mcp
+            └────────┬─────────┘
+                     │ HTTP (vía Consul discovery)
+         ┌───────────┼───────────┐
+         ↓           ↓           ↓
+    booking-svc  users-svc  notif-svc
+```
+
+Cada agente **usa MCP internamente** para ejecutar las acciones reales: no habla HTTP directo con los microservicios, sino que invoca tools del MCP Server, que a su vez resuelve los servicios vía Consul.
+
+### Los 3 agentes
+
+| Agente | Puerto | Skills | Agent Card |
+|--------|--------|--------|------------|
+| orchestrator-agent | 9000 | (cliente A2A, no publica card) | — |
+| booking-agent | 9001 | `list_classes`, `create_booking`, `cancel_booking` | `http://localhost:9001/.well-known/agent.json` |
+| notification-agent | 9002 | `send_notification`, `get_history` | `http://localhost:9002/.well-known/agent.json` |
+
+### Agent Card (ejemplo real)
+
+```bash
+curl http://localhost:9001/.well-known/agent.json
+```
+
+```json
+{
+  "name": "FitFlow Booking Agent",
+  "description": "Gestiona reservas de clases fitness en FitFlow",
+  "supportedInterfaces": [
+    { "url": "http://booking-agent:9001", "protocolBinding": "JSONRPC", "protocolVersion": "1.0" }
+  ],
+  "version": "1.0.0",
+  "capabilities": { "streaming": true },
+  "skills": [
+    { "id": "list_classes", "name": "Listar clases", "description": "Devuelve las clases disponibles..." },
+    { "id": "create_booking", "name": "Crear reserva", "description": "Reserva una clase de fitness..." },
+    { "id": "cancel_booking", "name": "Cancelar reserva", "description": "Cancela una reserva existente..." }
+  ]
+}
+```
+
+Se usa el SDK oficial de Google (`a2a-sdk`, protocolo A2A v1.0). En v1.0 la URL del agente vive dentro de `supportedInterfaces` (junto con su binding de protocolo) en vez de ser un campo `url` plano. El card se sirve en **dos rutas equivalentes**: `/.well-known/agent.json` (la que especifica el enunciado) y `/.well-known/agent-card.json` (la ruta por defecto del SDK en v1.0).
+
+### Cómo se descubren y delegan
+
+1. El Orchestrator lee el Agent Card de cada agente (`A2ACardResolver`) y arma un índice `skill_id → agente`.
+2. Pide la lista de clases al Booking Agent (`list_classes`) para poder aterrizar nombres ("yoga") en ids reales.
+3. Le pasa a **Gemini** las skills descubiertas como *function declarations* y la instrucción del usuario. La ejecución automática de funciones va desactivada: Gemini solo **decide** qué skills invocar y en qué orden.
+4. El Orchestrator delega cada decisión al agente correspondiente por A2A, enviando un sobre JSON `{"skill": ..., "args": {...}}`.
+5. Los resultados se encadenan: el `user_id` y el `booking_id` que devuelve `create_booking` se inyectan automáticamente en el `send_notification` siguiente.
+
+Las credenciales (`email`/`password`) nunca se le piden a Gemini: las inyecta el Orchestrator a partir del request.
+
+### Consul vs Agent Cards — la demo del botón
+
+Los 3 agentes **no se registran en Consul al arrancar**, a propósito: su descubrimiento es vía Agent Card, que es un mecanismo distinto. Para hacer esa diferencia visible, el dashboard del Orchestrator (`http://localhost:9000`) tiene un botón **"Descubrir agentes vía Agent Card"** que los descubre y *entonces* los publica en Consul.
+
+```bash
+# 1. Antes: los agentes NO estan en Consul
+curl -s http://localhost:8500/v1/catalog/services | jq 'keys'
+# ["booking-svc", "consul", "notif-svc", "users-svc"]
+
+# 2. El boton (o su endpoint equivalente)
+curl -X POST http://localhost:9000/agents/discover | jq '.discovered[].name'
+# "FitFlow Booking Agent"
+# "FitFlow Notification Agent"
+
+# 3. Despues: aparecen en Consul, en verde
+curl -s http://localhost:8500/v1/catalog/services | jq 'keys'
+# ["booking-agent", "booking-svc", "consul", "notif-svc", "notification-agent", "users-svc"]
+```
+
+`POST /agents/reset` (botón "Reiniciar demo") los da de baja, para poder repetir la demostración.
+
+> La UI de Consul no se puede extender con botones propios — es una SPA compilada dentro de la imagen `hashicorp/consul:1.17` — por eso el botón vive en el dashboard del Orchestrator y Consul se actualiza como consecuencia.
+
+### Uso
+
+```bash
+# Dashboard (botón de descubrimiento + formulario de instrucción)
+open http://localhost:9000
+
+# O por API:
+curl -X POST http://localhost:9000/instruct \
+  -H "Content-Type: application/json" \
+  -d '{
+    "instruction": "Reserva yoga para el viernes y avísame por notificación",
+    "email": "alice@example.com",
+    "password": "secret123"
+  }' | jq
+```
+
+```jsonc
+{
+  "instruction": "Reserva yoga para el viernes y avísame por notificación",
+  "correlation_id": "…",
+  "steps": [
+    { "skill": "create_booking",    "agent": "FitFlow Booking Agent",      "ok": true, "result": { "id": 1, "status": "confirmed", … } },
+    { "skill": "send_notification", "agent": "FitFlow Notification Agent", "ok": true, "result": { "id": 2, … } }
+  ],
+  "summary": "2/2 skills ejecutadas correctamente."
+}
+```
+
+Ver los logs de comunicación A2A entre agentes:
+
+```bash
+docker compose logs -f orchestrator-agent booking-agent notification-agent | grep '"event": "a2a\.'
+```
+
+### Requisitos
+
+- `GEMINI_API_KEY` en `.env` (obtener en https://aistudio.google.com/apikey). Sin ella, el descubrimiento y la delegación funcionan igual, pero `/instruct` devuelve un error explicando que falta la key.
+- `demo_a2a.sh` automatiza toda la verificación de esta sección.
+
+La API de Gemini devuelve `503 UNAVAILABLE` ("high demand") de forma intermitente; las llamadas se reintentan automáticamente con backoff (`tenacity`, 4 intentos) para que eso no tumbe la demo.
 
 ---
 
@@ -609,6 +779,17 @@ docker compose up -d --build
 
 Imprime `[OK]`/`[FAIL]` por cada verificación y un resumen final. Requiere `curl` y `jq`.
 
+### `demo_a2a.sh` (Task 5)
+
+`demo_a2a.sh` es el equivalente para la red de agentes: health checks de los 3 agentes, Agent Cards publicados, el contraste Consul antes/después del botón de descubrimiento, una instrucción en lenguaje natural delegada vía A2A, verificación independiente de que la reserva y la notificación existen de verdad, y los logs de comunicación A2A.
+
+```bash
+docker compose up -d --build
+./demo_a2a.sh
+```
+
+El paso de lenguaje natural requiere una `GEMINI_API_KEY` real en `.env`; el resto de pasos corre sin ella.
+
 ---
 
 ## Flujo end-to-end demostrado
@@ -709,6 +890,7 @@ Proyecto/
 ├── TASKS_ROADMAP.md          # detalle y estado de cada task (1-5 + extra)
 ├── docker-compose.yml        # orquestación de servicios
 ├── demo.sh                   # demo end-to-end automatizada (Task 4)
+├── demo_a2a.sh               # demo de la red de agentes A2A (Task 5)
 │
 ├── users-svc/
 │   ├── Dockerfile
@@ -768,15 +950,46 @@ Proyecto/
 │           ├── notifications.py  # GET protegido con JWT + ownership (Task 4)
 │           └── health.py
 │
-└── fitflow-mcp/
-    ├── Dockerfile            # solo para perfil http
+├── fitflow-mcp/
+│   ├── Dockerfile            # corre server_http.py (transporte streamable-http)
+│   ├── requirements.txt
+│   └── app/
+│       ├── server.py         # FastMCP + tools, transporte stdio (Claude Desktop)
+│       ├── server_http.py    # FastMCP + tools, transporte HTTP (agentes Task 5)
+│       ├── config.py
+│       ├── discovery.py      # resolución Consul (similar a booking-svc)
+│       └── tools.py          # 5 tools: classes, booking, cancel, notify, history
+│
+│   # --- Agentes A2A (Task 5) ---
+│
+├── booking-agent/            # servidor A2A, skills de reservas
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   └── app/
+│       ├── main.py           # FastAPI + rutas A2A + Agent Card en 2 paths
+│       ├── config.py
+│       ├── agent_card.py     # AgentCard + AgentSkill
+│       ├── executor.py       # AgentExecutor: skill -> tool MCP
+│       ├── mcp_client.py     # cliente MCP streamable-http (con retry)
+│       ├── logging_config.py
+│       └── middleware.py
+│
+├── notification-agent/       # idéntico, skills de notificaciones
+│   └── ...
+│
+└── orchestrator-agent/       # cliente A2A + NLU Gemini + dashboard
+    ├── Dockerfile
     ├── requirements.txt
     └── app/
-        ├── server.py         # FastMCP + tools, transporte stdio
-        ├── server_http.py    # alternativo: transporte HTTP (futuro)
+        ├── main.py           # /instruct, /agents/discover, /agents/reset, dashboard
         ├── config.py
-        ├── discovery.py      # resolución Consul (similar a booking-svc)
-        └── tools.py          # get_available_classes, create_booking, cancel_booking
+        ├── agent_registry.py # descubrimiento vía Agent Card
+        ├── nlu_gemini.py     # skills -> function declarations -> decisión
+        ├── a2a_dispatch.py   # delegación A2A + logs de comunicación
+        ├── consul_publish.py # publica/da de baja agentes en Consul (el botón)
+        ├── static/index.html # dashboard
+        ├── logging_config.py
+        └── middleware.py
 ```
 
 ---
@@ -801,18 +1014,18 @@ Todas las env vars se cargan automáticamente al iniciar los servicios vía `doc
 
 **MCP:**
 - `MCP_RUN_MODE` — "local" (host) o "docker" (dentro de docker-compose)
+- `MCP_SERVER_URL` — endpoint MCP que consumen los agentes (default `http://fitflow-mcp:8000/mcp`)
+
+**Gemini y agentes A2A (Task 5):**
+- `GEMINI_API_KEY` — API key de Gemini para el NLU del Orchestrator (obtener en https://aistudio.google.com/apikey)
+- `GEMINI_MODEL` — modelo a usar (default `gemini-2.5-flash`)
+- `BOOKING_AGENT_URL`, `NOTIFICATION_AGENT_URL` — URLs donde el Orchestrator busca los Agent Cards
 
 ---
 
-## Siguientes pasos (Task 5 + extra, futuro)
+## Siguientes pasos (punto extra)
 
-Tasks 1, 2A, 2B, 3 y 4 están completadas (ver tabla de estado al inicio del README y [`TASKS_ROADMAP.md`](./TASKS_ROADMAP.md)). Lo que queda:
-
-### Task 5 — Agent-to-Agent (A2A)
-- Introducir Orchestrator Agent, Booking Agent, Notification Agent
-- Cada agente publica un Agent Card en `/.well-known/agent.json`
-- Agentes se descubren entre sí vía Agent Cards (análogo a Consul, pero para agentes)
-- Demostración: Claude Desktop → Orchestrator Agent → Booking/Notification Agents → servicios reales
+Tasks 1, 2A, 2B, 3, 4 y 5 están completadas (ver tabla de estado al inicio del README y [`TASKS_ROADMAP.md`](./TASKS_ROADMAP.md)). Lo único pendiente es el punto extra:
 
 ### Punto extra — Despliegue cloud (+15 pts)
 - Railway, Render, o Fly.io (recomendado para simplicidad)
@@ -883,5 +1096,5 @@ Este es un proyecto de Postgrado en Diseño y Desarrollo de Software, Universida
 ---
 
 **Última actualización**: Septiembre 2026
-**Status**: Tasks 1, 2A, 2B, 3 y 4 completadas y verificadas end-to-end (🚀 Ready for demo)
-**Roadmap**: Task 5 (Agent-to-Agent) y despliegue cloud pendientes — ver [`TASKS_ROADMAP.md`](./TASKS_ROADMAP.md)
+**Status**: Tasks 1, 2A, 2B, 3, 4 y 5 completadas y verificadas end-to-end (🚀 Ready for demo)
+**Roadmap**: solo queda el punto extra de despliegue cloud — ver [`TASKS_ROADMAP.md`](./TASKS_ROADMAP.md)
