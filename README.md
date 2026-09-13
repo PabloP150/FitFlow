@@ -735,6 +735,39 @@ curl http://localhost:8002/notifications/user/1 -H "Authorization: Bearer $TOKEN
 
 `demo.sh` automatiza este flujo completo (ver sección "Demo automatizado").
 
+### Por qué detener notif-svc *no* abre el circuit breaker
+
+Detalle importante, y contraintuitivo. Si se hace `docker compose stop notif-svc`, Consul deja de reportarlo como `passing` a los pocos segundos, con lo cual `get_service_url("notif-svc")` **falla antes** de que la llamada llegue a la capa de retry/breaker. La notificación va directo al outbox y en los logs se ve:
+
+```json
+{"event": "notification.failed_queuing_outbox", "error": "Service notif-svc not found or not passing health check", ...}
+```
+
+Es el comportamiento correcto — fallar rápido cuando el registry ya sabe que el servicio no está — pero significa que ese camino demuestra el **outbox**, no el **circuit breaker**.
+
+El circuit breaker existe para el otro escenario: notif-svc *alcanzable pero fallando* (timeouts, 5xx). Para demostrarlo hay un script dedicado:
+
+```bash
+./demo_circuit_breaker.sh
+```
+
+Corre dentro de `booking-svc`, en un solo proceso (el estado del breaker vive en memoria), y muestra el ciclo completo:
+
+```
+FASE 1 — 3 llamadas fallidas, cada una agotando sus reintentos
+  --> llamada 1: fallo tras agotar 3 reintentos (3005 ms — backoff exponencial)
+  --> llamada 2: fallo tras agotar 3 reintentos (2295 ms)
+  --> llamada 3: fallo tras agotar 3 reintentos (2868 ms)
+
+FASE 2 — el circuito está ABIERTO
+  [OK] CIRCUITO ABIERTO: falla en 0.02 ms, sin tocar la red
+
+FASE 3 — tras el recovery_timeout (10s)
+  [OK] sonda exitosa en 39 ms -> CIRCUITO CERRADO de nuevo
+```
+
+El contraste entre 2868 ms y 0.02 ms es la prueba visual de que el circuito está abierto: deja de intentar la red por completo.
+
 ---
 
 ## Observabilidad (Task 3)
@@ -787,6 +820,14 @@ docker compose up -d --build
 ```
 
 Imprime `[OK]`/`[FAIL]` por cada verificación y un resumen final. Requiere `curl` y `jq`.
+
+### `demo_circuit_breaker.sh` (Task 3)
+
+Demuestra el ciclo del circuit breaker (cerrado → abierto → half-open → cerrado) contra un notif-svc alcanzable pero caído. Es el complemento de `demo.sh`: ese muestra el outbox, este muestra el breaker. Ver la nota *"Por qué detener notif-svc no abre el circuit breaker"* más arriba.
+
+```bash
+./demo_circuit_breaker.sh
+```
 
 ### `demo_a2a.sh` (Task 5)
 

@@ -40,6 +40,9 @@ Proyecto de Postgrado en Diseño y Desarrollo de Software, Universidad Galileo. 
    - Llamada 4 falla en `<10ms` con `CircuitBreakerError` (sin tocar la red) — confirma que el circuito está abierto.
    - Tras esperar el `recovery_timeout` (10s), una llamada de sonda contra el notif-svc real (ya sano) tiene éxito → el circuito se cierra; la siguiente llamada vuelve a comportarse con normalidad.
 
+**Hallazgo: detener notif-svc no abre el circuit breaker** (documentado en el README):
+Al hacer `docker compose stop notif-svc`, Consul lo saca de `passing` y `get_service_url()` falla *antes* de llegar a la capa de retry/breaker — la notificación va directo al outbox (`error: "Service notif-svc not found or not passing health check"`). Es el comportamiento correcto (fallar rápido cuando el registry ya sabe que el servicio no está), pero significa que ese camino demuestra el **outbox**, no el **breaker**. Para el checkpoint del video *"mostrar circuit breaker abierto"* se agregó `demo_circuit_breaker.sh`, que ejercita `call_notif_service` contra un endpoint alcanzable pero caído, en un solo proceso: 3 llamadas fallan agotando reintentos (~3000/2295/2868 ms de backoff visible), la 4ª devuelve `CircuitBreakerError` en **0.02 ms** sin tocar la red, y tras el `recovery_timeout` una sonda contra el notif-svc real cierra el circuito.
+
 **Decisiones de diseño documentadas en el código** (`resilience.py`, `outbox.py`):
 - `circuitbreaker==2.1.3` es async-aware (detecta `iscoroutinefunction` automáticamente) — se usa siempre como decorador, nunca invocando `call_async()` manualmente.
 - Orden de decoradores importa: `@circuit` envuelve a `@retry` (no al revés), así el circuit breaker cuenta como "un fallo" el resultado FINAL de una llamada (tras agotar los reintentos), no cada intento individual.

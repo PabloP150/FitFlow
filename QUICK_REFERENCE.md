@@ -178,7 +178,7 @@ curl -s http://localhost:8500/v1/catalog/services | python3 -m json.tool
 ### Estructura de carpetas
 
 ```
-/Users/pablopineda/Desktop/Proyecto/
+FitFlow/
 │
 ├── .git/                           # Git repository
 ├── .gitignore

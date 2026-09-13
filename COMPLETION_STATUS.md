@@ -1,5 +1,10 @@
 # FitFlow — Status de Completación
 
+> **SNAPSHOT HISTORICO (2026-08-24)** — refleja el estado al terminar
+> Task 1 + 2A. El proyecto avanzó bastante desde entonces: ver
+> [`TASKS_ROADMAP.md`](./TASKS_ROADMAP.md) y [`README.md`](./README.md)
+> para el estado actual (Tasks 1-5 + despliegue en AWS).
+
 **Fecha**: 2026-08-24  
 **Modelos Utilizados**: Opus (planeación), Sonnet (implementación)
 
@@ -143,7 +148,7 @@ Entregables:
    ```bash
    # Prueba de discovery (Consul debe estar up)
    python -c "
-   import sys; sys.path.insert(0, '/Users/pablopineda/Desktop/Proyecto/fitflow-mcp')
+   import sys; sys.path.insert(0, '<ruta-al-repo>/fitflow-mcp')
    from app.discovery import get_service_url
    print('booking-svc:', get_service_url('booking-svc'))
    "
@@ -202,7 +207,7 @@ Entregables:
 Cuando estés listo para subir el repo:
 
 ```bash
-cd /Users/pablopineda/Desktop/Proyecto
+cd <ruta-al-repo>
 
 # Agregar remote (reemplaza con tu repo URL)
 git remote add origin https://github.com/tu-usuario/tu-repo.git
