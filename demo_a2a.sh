@@ -14,20 +14,26 @@
 #   8. Logs de comunicacion A2A entre agentes
 #
 # Uso:
-#   ./demo_a2a.sh
+#   ./demo_a2a.sh                 # contra el stack local
+#   HOST=3.209.94.238 ./demo_a2a.sh   # contra el despliegue en AWS
 #
 # Requiere: docker compose ya levantado (`docker compose up -d --build`),
 # curl, jq, y una GEMINI_API_KEY real en .env para el paso 6.
+#
+# El paso 8 (logs A2A) solo funciona en local, porque necesita `docker compose`
+# en la maquina donde corre el script.
 
 set -uo pipefail
 
-USERS_URL="http://localhost:8003"
-BOOKING_URL="http://localhost:8001"
-NOTIF_URL="http://localhost:8002"
-CONSUL_URL="http://localhost:8500"
-ORCH_URL="http://localhost:9000"
-BOOKING_AGENT_URL="http://localhost:9001"
-NOTIF_AGENT_URL="http://localhost:9002"
+HOST="${HOST:-localhost}"
+
+USERS_URL="http://$HOST:8003"
+BOOKING_URL="http://$HOST:8001"
+NOTIF_URL="http://$HOST:8002"
+CONSUL_URL="http://$HOST:8500"
+ORCH_URL="http://$HOST:9000"
+BOOKING_AGENT_URL="http://$HOST:9001"
+NOTIF_AGENT_URL="http://$HOST:9002"
 
 EMAIL="a2a-demo@example.com"
 PASSWORD="secret123"
@@ -169,17 +175,24 @@ fi
 
 # ------------------------------------------------------------- 8. logs A2A
 step "8. Logs de comunicacion A2A entre agentes"
-echo "    (ultimas lineas con eventos a2a.*)"
-a2a_logs=$(docker compose logs --tail 400 orchestrator-agent booking-agent notification-agent 2>/dev/null \
-  | grep '"event": "a2a\.' | tail -8)
-if [ -n "$a2a_logs" ]; then
-  echo "$a2a_logs" | sed 's/^/    /'
+if [ "$HOST" != "localhost" ]; then
+  echo "    (omitido: el stack corre en $HOST, no en esta maquina)"
+  echo "    Para verlos, conectarse a la instancia:"
+  echo "      aws ssm start-session --target \$(cd infra/aws && terraform output -raw instance_id)"
+  echo "      cd /opt/fitflow && sudo docker compose logs -f orchestrator-agent booking-agent notification-agent"
 else
-  warn "No se encontraron logs a2a.* (docker compose accesible? se ejecuto el paso 6?)"
+  echo "    (ultimas lineas con eventos a2a.*)"
+  a2a_logs=$(docker compose logs --tail 400 orchestrator-agent booking-agent notification-agent 2>/dev/null \
+    | grep '"event": "a2a\.' | tail -8)
+  if [ -n "$a2a_logs" ]; then
+    echo "$a2a_logs" | sed 's/^/    /'
+  else
+    warn "No se encontraron logs a2a.* (docker compose accesible? se ejecuto el paso 6?)"
+  fi
+  echo ""
+  echo "    Para ver el flujo completo en vivo:"
+  echo "      docker compose logs -f orchestrator-agent booking-agent notification-agent"
 fi
-echo ""
-echo "    Para ver el flujo completo en vivo:"
-echo "      docker compose logs -f orchestrator-agent booking-agent notification-agent"
 
 # ---------------------------------------------------------------- resumen
 echo ""

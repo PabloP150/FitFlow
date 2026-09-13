@@ -140,4 +140,12 @@ Proyecto de Postgrado en Diseño y Desarrollo de Software, Universidad Galileo. 
 - **VPC propia** en vez de la default: la cuenta no tenía ninguna VPC, así que el `apply` funciona sobre una cuenta vacía. Subnet pública con IGW, sin NAT Gateway (que costaría ~$32/mes y no hace falta porque la instancia tiene IP pública).
 - **Swap de 2 GB**: `t3.micro` tiene 1 GB de RAM y aquí corren 11 contenedores; sin swap el kernel mata procesos por OOM.
 
+**Verificación realizada** (desplegado en vivo, `us-east-1`):
+1. `terraform apply` creó los 26 recursos; el bootstrap completo (instalar Docker, clonar, construir 7 imágenes y levantar 11 contenedores) tardó ~3 min.
+2. Los 6 servicios de aplicación responden `/healthz` por IP pública; Consul UI accesible; Agent Cards servidos públicamente.
+3. Los puertos de PostgreSQL (5433-5435) **no** son accesibles desde internet — verificado con conexión TCP directa.
+4. `HOST=<ip> ./demo_a2a.sh` → 14/14 checks, incluyendo el flujo completo del enunciado con Gemini y la verificación independiente de que la reserva y la notificación existen en las bases.
+5. Secretos: los 5 parámetros en Parameter Store como `SecureString`; la instancia los lee con su rol IAM y nunca hay credenciales en disco.
+6. Los 11 contenedores quedan `healthy`; uso de memoria ~574 MB de 916 MB de RAM **+ ~367 MB de swap** — confirma que el swap de `user_data.sh` no era opcional en `t3.micro`.
+
 **Costo**: ~$0 dentro de la capa gratuita (t3.micro 750 h/mes, EBS gp3 20 GB de los 30 GB gratuitos, Parameter Store estándar gratis, EIP gratis mientras esté asociada a una instancia encendida). `terraform destroy` lo apaga todo.

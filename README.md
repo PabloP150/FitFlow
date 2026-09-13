@@ -1036,6 +1036,23 @@ Todas las env vars se cargan automáticamente al iniciar los servicios vía `doc
 
 Todo el sistema corre en la nube sobre una instancia EC2, provisionada con Terraform, con los secretos en **AWS Systems Manager Parameter Store** en vez de un `.env` versionado.
 
+### Despliegue actual
+
+| Componente | URL pública |
+|---|---|
+| Dashboard A2A | http://3.209.94.238:9000 |
+| Consul UI | http://3.209.94.238:8500/ui |
+| users-svc | http://3.209.94.238:8003 |
+| booking-svc | http://3.209.94.238:8001 |
+| notif-svc | http://3.209.94.238:8002 |
+| MCP Server | http://3.209.94.238:8000/mcp |
+| Booking Agent Card | http://3.209.94.238:9001/.well-known/agent.json |
+| Notification Agent Card | http://3.209.94.238:9002/.well-known/agent.json |
+
+Verificado en la nube con `HOST=3.209.94.238 ./demo_a2a.sh` — 14/14 checks, incluyendo el flujo completo *"Reserva yoga para el viernes y avísame por notificación"* delegado a los dos agentes. Las bases de datos **no** son accesibles desde internet (puertos 5433-5435 cerrados).
+
+> Esta IP existe mientras la infraestructura esté levantada. Tras `terraform destroy` deja de responder; un nuevo `apply` genera otra IP (`terraform output urls`).
+
 ### Por qué EC2 + Docker Compose y no ECS Fargate
 
 El enunciado permite ambas ("*Los servicios como contenedores en ECS Fargate **o en una instancia EC2 con Docker Compose***"). Se eligió EC2 porque:
@@ -1112,6 +1129,13 @@ open http://$IP:8500/ui     # Consul
 ```
 
 `terraform output urls` imprime la lista completa de URLs públicas.
+
+```bash
+# 7. Verificar el sistema completo contra el despliegue (mismo script que en local)
+cd .. && HOST=$IP ./demo_a2a.sh
+```
+
+**Nota sobre memoria**: medido en la instancia con los 11 contenedores corriendo, el uso es ~574 MB de los 916 MB de RAM **más ~367 MB de swap**. Sin el swap que configura `user_data.sh` el kernel mataría procesos por OOM. Si se quiere margen, `instance_type = "t3.small"` (2 GB, ya fuera de la capa gratuita).
 
 ### Gestión de secretos (sin `.env` en el repo)
 
