@@ -1,0 +1,22 @@
+# Copiar a terraform.tfvars y ajustar si hace falta.
+# terraform.tfvars esta en .gitignore (puede contener la API key).
+
+aws_region    = "us-east-1"
+instance_type = "t3.micro"
+
+# Repositorio que la instancia clona al arrancar.
+repo_url    = "https://github.com/PabloP150/FitFlow.git"
+repo_branch = "main"
+
+# Acceso publico a los servicios (lo que pide el enunciado).
+# Para restringir a tu propia IP: allowed_cidr = ["A.B.C.D/32"]
+allowed_cidr = ["0.0.0.0/0"]
+
+# SSH cerrado por defecto: se administra con SSM Session Manager.
+# Para habilitarlo:
+#   ssh_allowed_cidr = ["A.B.C.D/32"]
+#   ssh_key_name     = "mi-key-pair"
+
+# Dejar vacio y setear la key despues con `aws ssm put-parameter` para que
+# NO quede guardada en el archivo de estado de Terraform (recomendado):
+# gemini_api_key = ""

@@ -93,7 +93,7 @@
     </p>
     <div class="row">
       <button id="discover">Descubrir agentes via Agent Card</button>
-      <a class="row" href="http://localhost:8500/ui/dc1/services" target="_blank" rel="noopener">
+      <a class="row" id="consulLink" href="http://localhost:8500/ui/dc1/services" target="_blank" rel="noopener">
         <button class="secondary" type="button">Ver en Consul UI &rarr;</button>
       </a>
       <button class="secondary" id="reset" type="button"
@@ -138,6 +138,10 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+
+// Consul corre en el mismo host que el dashboard (localhost en dev, la IP
+// publica de la instancia en el despliegue cloud), solo cambia el puerto.
+$('consulLink').href = `${location.protocol}//${location.hostname}:8500/ui/dc1/services`;
 
 $('discover').addEventListener('click', async () => {
   const btn = $('discover'), status = $('discoverStatus'), list = $('agents');

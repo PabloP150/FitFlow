@@ -1,0 +1,58 @@
+# Override para el despliegue en AWS (punto extra).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.cloud.yml up -d
+#
+# Dos diferencias respecto a correr en local:
+#
+# 1. `restart: unless-stopped` en todo: si la instancia se reinicia o un
+#    contenedor muere, vuelve solo. En local no hace falta.
+#
+# 2. PostgreSQL afinado para poca RAM. La instancia t3.micro tiene 1 GB y aca
+#    corren 3 Postgres. Con el `shared_buffers` por defecto (128 MB c/u) se
+#    reservarian 384 MB solo en buffers; bajarlo a 32 MB deja memoria para los
+#    8 contenedores de aplicacion. Para el volumen de datos de una demo es de
+#    sobra.
+#
+# Las bases NO exponen puertos al exterior: en local se publican 5433-5435 para
+# poder hacer psql desde el host, pero en la nube eso seria exponer PostgreSQL a
+# internet. Aca se dejan accesibles solo dentro de la red de docker.
+
+services:
+  users-db:
+    restart: unless-stopped
+    command: postgres -c shared_buffers=32MB -c max_connections=50
+    ports: !override []
+
+  booking-db:
+    restart: unless-stopped
+    command: postgres -c shared_buffers=32MB -c max_connections=50
+    ports: !override []
+
+  notif-db:
+    restart: unless-stopped
+    command: postgres -c shared_buffers=32MB -c max_connections=50
+    ports: !override []
+
+  consul:
+    restart: unless-stopped
+
+  users-svc:
+    restart: unless-stopped
+
+  booking-svc:
+    restart: unless-stopped
+
+  notif-svc:
+    restart: unless-stopped
+
+  fitflow-mcp:
+    restart: unless-stopped
+
+  booking-agent:
+    restart: unless-stopped
+
+  notification-agent:
+    restart: unless-stopped
+
+  orchestrator-agent:
+    restart: unless-stopped

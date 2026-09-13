@@ -5,40 +5,47 @@
 FitFlow es un sistema de microservicios construido con Python + FastAPI, que demuestra patrones de arquitectura moderna: service discovery dinámica con Consul, integración MCP con agentes de IA, y resiliencia distribuida.
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Claude Desktop (MCP Client)               │
-│              "¿Qué clases hay disponibles?"                 │
-└────────────────┬────────────────────────────────────────────┘
-                 │ MCP Protocol (stdio)
-                 ↓
-          ┌──────────────────┐
-          │  fitflow-mcp     │  (puerto 8000 en docker)
-          │  MCP Server      │
-          │  3 tools:        │
-          │ - get_available_classes
-          │ - create_booking
-          │ - cancel_booking
-          └────────┬─────────┘
-                   │ HTTP (via Consul discovery)
-        ┌──────────┼──────────┐
-        ↓          ↓          ↓
-   ┌─────────┐ ┌─────────┐ ┌─────────┐
-   │users-svc│ │booking- │ │notif-   │
-   │:8003    │ │svc:8001 │ │svc:8002 │
-   └────┬────┘ └────┬────┘ └────┬────┘
-        │            │           │
-   ┌────▼──┐   ┌─────▼──┐  ┌────▼──┐
-   │users_ │   │booking_│  │notif_ │
-   │db     │   │db      │  │db     │
-   │PG     │   │PG      │  │PG     │
-   └───────┘   └────────┘  └───────┘
+┌──────────────────────────┐   ┌──────────────────────────────────┐
+│  Claude Desktop          │   │  Usuario / dashboard :9000       │
+│  "¿Qué clases hay?"      │   │  "Reserva yoga y avísame"        │
+└────────────┬─────────────┘   └────────────┬─────────────────────┘
+             │ MCP (stdio)                  │ HTTP
+             │                              ↓
+             │                   ┌──────────────────────┐
+             │                   │ orchestrator-agent   │ ── Gemini (decide
+             │                   │ :9000                │     qué skills usar)
+             │                   └───────┬──────────────┘
+             │                           │ A2A (descubre por Agent Card,
+             │                           │      delega en secuencia)
+             │              ┌────────────┴────────────┐
+             │              ↓                         ↓
+             │   ┌────────────────────┐  ┌──────────────────────┐
+             │   │ booking-agent      │  │ notification-agent   │
+             │   │ :9001              │  │ :9002                │
+             │   └─────────┬──────────┘  └──────────┬───────────┘
+             │             │ MCP (streamable-http)  │
+             ↓             └───────────┬────────────┘
+      ┌──────────────────────────────────────┐
+      │           fitflow-mcp :8000          │  5 tools
+      └────────────────────┬─────────────────┘
+                           │ HTTP (vía Consul discovery)
+        ┌──────────────────┼──────────────────┐
+        ↓                  ↓                  ↓
+   ┌─────────┐       ┌──────────┐       ┌──────────┐
+   │users-svc│       │booking-  │       │notif-    │
+   │:8003    │       │svc:8001  │       │svc:8002  │
+   └────┬────┘       └────┬─────┘       └────┬─────┘
+        │                 │                  │
+   ┌────▼───┐        ┌────▼────┐        ┌────▼───┐
+   │users_db│        │booking_ │        │notif_db│
+   │  PG    │        │db  PG   │        │  PG    │
+   └────────┘        └─────────┘        └────────┘
 
         ↓↑ Auto-registro & Discovery
-   
    ┌────────────────────┐
-   │      Consul        │
-   │ Service Registry   │
-   │   :8500            │
+   │      Consul        │   Los microservicios se auto-registran.
+   │ Service Registry   │   Los agentes NO: se descubren entre sí
+   │   :8500            │   por Agent Card (ver Task 5).
    └────────────────────┘
 ```
 
@@ -63,6 +70,8 @@ FitFlow es un sistema de microservicios construido con Python + FastAPI, que dem
 - **Resiliencia**: la llamada booking-svc → notif-svc tiene retries con backoff exponencial + jitter, circuit breaker, y un outbox durable — una reserva nunca falla por culpa de notif-svc.
 - **Observabilidad**: logs estructurados en JSON en los 3 servicios, con un `x-correlation-id` propagado de punta a punta.
 - **Seguridad**: JWT validado en todos los endpoints que exponen datos de usuario, con verificación de *ownership* (un usuario solo puede ver/cancelar sus propias reservas y notificaciones).
+- **Agent-to-Agent**: tres agentes especializados se descubren por Agent Card y se delegan skills entre sí; cada uno ejecuta las acciones reales vía MCP. MCP es "un agente usa herramientas"; A2A es "un agente delega a otro agente".
+- **Infraestructura como código**: el despliegue en AWS es un `terraform apply`, con los secretos en Parameter Store y nada sensible en el repo.
 
 ### Estado del proyecto
 
@@ -74,7 +83,7 @@ FitFlow es un sistema de microservicios construido con Python + FastAPI, que dem
 | 3 | Resiliencia (retry/backoff/jitter, circuit breaker, outbox) + Observabilidad (logs JSON, correlation ID) | ✅ Completado |
 | 4 | Seguridad (ownership checks, JWT endurecido) + README + demo automatizado | ✅ Completado |
 | 5 | Agent-to-Agent (Orchestrator/Booking/Notification Agents, Agent Cards) | ✅ Completado |
-| Extra | Despliegue cloud | ⏳ Pendiente |
+| Extra | Despliegue cloud en AWS (EC2 + Terraform + Parameter Store) | ✅ Implementado |
 
 Ver [`TASKS_ROADMAP.md`](./TASKS_ROADMAP.md) para el detalle de cada task.
 
@@ -1023,14 +1032,126 @@ Todas las env vars se cargan automáticamente al iniciar los servicios vía `doc
 
 ---
 
-## Siguientes pasos (punto extra)
+## Despliegue en AWS (punto extra)
 
-Tasks 1, 2A, 2B, 3, 4 y 5 están completadas (ver tabla de estado al inicio del README y [`TASKS_ROADMAP.md`](./TASKS_ROADMAP.md)). Lo único pendiente es el punto extra:
+Todo el sistema corre en la nube sobre una instancia EC2, provisionada con Terraform, con los secretos en **AWS Systems Manager Parameter Store** en vez de un `.env` versionado.
 
-### Punto extra — Despliegue cloud (+15 pts)
-- Railway, Render, o Fly.io (recomendado para simplicidad)
-- AWS (ECS Fargate + RDS) o Google Cloud (Cloud Run + Cloud SQL)
-- Secretos manejados con el servicio de secrets del proveedor, no `.env`
+### Por qué EC2 + Docker Compose y no ECS Fargate
+
+El enunciado permite ambas ("*Los servicios como contenedores en ECS Fargate **o en una instancia EC2 con Docker Compose***"). Se eligió EC2 porque:
+
+- Son **11 contenedores**, 3 de ellos PostgreSQL. En RDS serían 3 instancias gestionadas — muy por encima de la capa gratuita (la free tier cubre *una* instancia RDS).
+- El `docker-compose.yml` local funciona **tal cual**: mismo networking interno, mismo Consul, mismos Agent Cards. En Fargate habría que rehacer el service discovery (Cloud Map) y montar EFS para las bases.
+- Entra en la capa gratuita: `t3.micro` (750 h/mes) + EBS gp3 20 GB (free tier: 30 GB) + Parameter Store estándar (gratis) + Elastic IP (gratis mientras esté asociada a una instancia encendida). **Costo objetivo: ~$0.**
+
+### Arquitectura desplegada
+
+```
+Internet
+   │
+   ▼  (Security Group: 8000-8003, 8500, 9000-9002)
+┌──────────────────────────────────────────────┐
+│  EC2 t3.micro — Amazon Linux 2023            │
+│  Elastic IP estable                          │
+│                                              │
+│  docker compose -f docker-compose.yml \      │
+│                 -f docker-compose.cloud.yml  │
+│                                              │
+│  11 contenedores (idénticos a local)         │
+│  + 2 GB de swap                              │
+└───────────────────┬──────────────────────────┘
+                    │ rol IAM (sin credenciales en disco)
+                    ▼
+        SSM Parameter Store (SecureString)
+        /fitflow/JWT_SECRET_KEY
+        /fitflow/USERS_DB_PASSWORD
+        /fitflow/BOOKING_DB_PASSWORD
+        /fitflow/NOTIF_DB_PASSWORD
+        /fitflow/GEMINI_API_KEY
+```
+
+### Desplegar paso a paso
+
+**Prerrequisitos**: Terraform ≥ 1.5, AWS CLI configurado (`aws sts get-caller-identity` debe responder).
+
+```bash
+cd infra/aws
+
+# 1. Inicializar
+terraform init
+
+# 2. Revisar qué se va a crear (26 recursos, todos destruibles)
+terraform plan
+
+# 3. Desplegar
+terraform apply
+```
+
+Terraform crea: una VPC propia con subnet pública e Internet Gateway (la cuenta puede no tener VPC por defecto), el security group, un rol IAM que **solo** puede leer `/fitflow/*` de Parameter Store, los secretos (contraseñas generadas aleatoriamente — nadie las escribe ni viajan por el repo), la instancia y la Elastic IP.
+
+```bash
+# 4. Setear la API key de Gemini fuera del state de Terraform
+aws ssm put-parameter --name /fitflow/GEMINI_API_KEY \
+  --value 'TU_KEY' --type SecureString --overwrite --region us-east-1
+
+# 5. Conectarse a la instancia (sin SSH: Session Manager, puerto 22 cerrado)
+aws ssm start-session --target $(terraform output -raw instance_id)
+
+# Dentro de la instancia: seguir el bootstrap (~4-6 min) y aplicar la key
+sudo tail -f /var/log/fitflow-bootstrap.log
+sudo systemctl restart fitflow
+```
+
+```bash
+# 6. Verificar desde tu máquina
+IP=$(terraform output -raw public_ip)
+curl http://$IP:8003/healthz
+curl http://$IP:9001/.well-known/agent.json | jq '.skills[].id'
+open http://$IP:9000        # dashboard A2A
+open http://$IP:8500/ui     # Consul
+```
+
+`terraform output urls` imprime la lista completa de URLs públicas.
+
+### Gestión de secretos (sin `.env` en el repo)
+
+- Las contraseñas de BD y el `JWT_SECRET_KEY` los **genera Terraform** (`random_password`) y los guarda como `SecureString` en Parameter Store. Nunca existen en texto plano en el repo.
+- La instancia los lee **en cada arranque** con su rol IAM ([`infra/aws/refresh-env.sh`](./infra/aws/refresh-env.sh)) y escribe un `.env` con permisos `600`. No hay credenciales de AWS guardadas en disco.
+- El rol IAM está acotado: solo `ssm:GetParameter*` sobre `/fitflow/*` y `kms:Decrypt` restringido a `kms:ViaService = ssm`.
+- **Rotar un secreto** sin downtime del resto del sistema:
+
+  ```bash
+  aws ssm put-parameter --name /fitflow/JWT_SECRET_KEY \
+    --value "$(openssl rand -hex 32)" --type SecureString --overwrite
+  aws ssm start-session --target $(terraform output -raw instance_id)
+  sudo systemctl restart fitflow    # relee SSM y recrea el .env
+  ```
+
+  (Rotar el JWT invalida los tokens ya emitidos; los usuarios vuelven a hacer login. Para rotar una contraseña de BD hay que cambiarla también en PostgreSQL con `ALTER USER`.)
+
+> Se usa Parameter Store y no Secrets Manager porque los parámetros estándar son **gratuitos** y Secrets Manager cobra ~$0.40 por secreto/mes. Ambos son el servicio de secretos gestionado de AWS; migrar sería directo si hiciera falta rotación automática.
+
+### Local vs cloud
+
+El mismo repo corre en los dos entornos; solo cambia de dónde salen los secretos y un override de compose:
+
+| | Local | AWS |
+|---|---|---|
+| Arranque | `docker compose up -d --build` | `docker compose -f docker-compose.yml -f docker-compose.cloud.yml up -d` |
+| Secretos | `.env` (gitignored, desde `.env.example`) | Parameter Store → `.env` generado en cada boot |
+| Puertos de BD | 5433-5435 publicados (para `psql` desde el host) | **no** publicados (no exponer PostgreSQL a internet) |
+| Reinicios | manual | `restart: unless-stopped` + servicio systemd |
+| PostgreSQL | defaults | `shared_buffers=32MB` (1 GB de RAM, 3 bases) |
+
+[`docker-compose.cloud.yml`](./docker-compose.cloud.yml) es el único archivo específico de la nube.
+
+### Apagar todo
+
+```bash
+cd infra/aws && terraform destroy
+```
+
+> ⚠️ Una Elastic IP es gratuita **mientras esté asociada a una instancia encendida**. Si se apaga la instancia sin liberar la EIP, AWS cobra por ella (~$3.60/mes). Para pausar sin gastar, `terraform destroy` y volver a `apply` cuando haga falta (el bootstrap es automático, ~5 min).
 
 ---
 
@@ -1096,5 +1217,5 @@ Este es un proyecto de Postgrado en Diseño y Desarrollo de Software, Universida
 ---
 
 **Última actualización**: Septiembre 2026
-**Status**: Tasks 1, 2A, 2B, 3, 4 y 5 completadas y verificadas end-to-end (🚀 Ready for demo)
-**Roadmap**: solo queda el punto extra de despliegue cloud — ver [`TASKS_ROADMAP.md`](./TASKS_ROADMAP.md)
+**Status**: Tasks 1, 2A, 2B, 3, 4 y 5 completadas y verificadas end-to-end, + despliegue cloud en AWS (🚀 Ready for demo)
+**Roadmap**: 110/110 puntos base + punto extra implementado — ver [`TASKS_ROADMAP.md`](./TASKS_ROADMAP.md)

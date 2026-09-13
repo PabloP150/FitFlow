@@ -10,3 +10,12 @@ venv/
 .idea/
 .vscode/
 *.log
+
+# Terraform (infra/aws)
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+*.tfvars
+!*.tfvars.example
+crash.log

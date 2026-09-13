@@ -12,7 +12,7 @@ Proyecto de Postgrado en Diseño y Desarrollo de Software, Universidad Galileo. 
 | 3 | Resiliencia (retry+backoff+jitter, circuit breaker, outbox pattern) + Observabilidad (logs JSON, `x-correlation-id`) | ✅ Completado | `./demo.sh`; ver detalle abajo |
 | 4 | Seguridad (ownership checks, JWT endurecido) + README + demo automatizado | ✅ Completado | `./demo.sh`; ver detalle abajo |
 | 5 | Agent-to-Agent (Orchestrator/Booking/Notification Agents, Agent Cards) | ✅ Completado | `./demo_a2a.sh`; ver detalle abajo |
-| Extra | Despliegue cloud (+15 pts) | ⏳ Pendiente | — |
+| Extra | Despliegue cloud en AWS (+15 pts) | ✅ Implementado | `cd infra/aws && terraform apply`; ver detalle abajo |
 
 ---
 
@@ -118,7 +118,26 @@ Proyecto de Postgrado en Diseño y Desarrollo de Software, Universidad Galileo. 
 
 **Requisito de entorno**: `GEMINI_API_KEY` en `.env` (gitignored) para el paso de lenguaje natural. El resto del flujo — Agent Cards, descubrimiento, publicacion en Consul y delegacion A2A — corre sin ella.
 
-## Punto extra — Despliegue cloud [pendiente]
+## Punto extra — Despliegue cloud en AWS
 
-- Railway, Render, o Fly.io (recomendado para simplicidad), o AWS (ECS Fargate + RDS) / Google Cloud (Cloud Run + Cloud SQL).
-- Secretos manejados con el servicio de secrets del proveedor, no `.env`.
+**Objetivo**: sistema accesible por URL pública (+8), secretos gestionados por el proveedor y no en `.env` (+4), y README con el paso a paso del despliegue (+3).
+
+**Entregables**:
+- [x] `infra/aws/main.tf` — VPC propia (subnet pública + IGW), security group, rol IAM de mínimo privilegio, secretos en SSM Parameter Store, instancia EC2 y Elastic IP. 26 recursos, todos destruibles con `terraform destroy`
+- [x] `infra/aws/user_data.sh` — bootstrap: swap de 2 GB, Docker + Compose v2, clona el repo, genera el `.env` desde SSM y levanta el stack
+- [x] `infra/aws/refresh-env.sh` — regenera el `.env` desde Parameter Store; es lo que permite rotar secretos con `systemctl restart fitflow`
+- [x] `infra/aws/variables.tf` / `outputs.tf` / `terraform.tfvars.example`
+- [x] `docker-compose.cloud.yml` — override de nube: `restart: unless-stopped`, PostgreSQL afinado para 1 GB de RAM, y puertos de BD **no** publicados
+- [x] `README.md` — sección "Despliegue en AWS" con el paso a paso, gestión/rotación de secretos y tabla local vs cloud
+- [x] `.gitignore` — estado de Terraform y `*.tfvars` excluidos
+
+**Decisiones de diseño**:
+- **EC2 + Docker Compose en vez de ECS Fargate**, opción que el enunciado permite explícitamente. Con 11 contenedores (3 de ellos PostgreSQL), Fargate + RDS quedaría muy fuera de la capa gratuita — la free tier de RDS cubre una sola instancia — y obligaría a rehacer el service discovery con Cloud Map y montar EFS para las bases. Con EC2, el `docker-compose.yml` local corre sin cambios: mismo Consul, mismo networking, mismos Agent Cards.
+- **SSM Parameter Store en vez de Secrets Manager**: ambos son el servicio de secretos gestionado de AWS, pero los parámetros estándar son gratuitos y Secrets Manager cuesta ~$0.40 por secreto/mes. El objetivo de costo era ~$0.
+- **Los secretos los genera Terraform** (`random_password`), no una persona: las contraseñas de BD y el `JWT_SECRET_KEY` nunca existen en texto plano en el repo. La API key de Gemini se setea con `aws ssm put-parameter` fuera del state (`lifecycle.ignore_changes`) para que tampoco quede en el archivo de estado.
+- **La instancia lee los secretos en cada arranque** con su rol IAM; no hay credenciales de AWS en disco. El rol solo puede leer `/fitflow/*` y descifrar vía SSM.
+- **Sin SSH**: el puerto 22 queda cerrado por defecto y la administración va por SSM Session Manager (sin llaves que gestionar ni rotar).
+- **VPC propia** en vez de la default: la cuenta no tenía ninguna VPC, así que el `apply` funciona sobre una cuenta vacía. Subnet pública con IGW, sin NAT Gateway (que costaría ~$32/mes y no hace falta porque la instancia tiene IP pública).
+- **Swap de 2 GB**: `t3.micro` tiene 1 GB de RAM y aquí corren 11 contenedores; sin swap el kernel mata procesos por OOM.
+
+**Costo**: ~$0 dentro de la capa gratuita (t3.micro 750 h/mes, EBS gp3 20 GB de los 30 GB gratuitos, Parameter Store estándar gratis, EIP gratis mientras esté asociada a una instancia encendida). `terraform destroy` lo apaga todo.
